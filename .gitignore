@@ -1,0 +1,8 @@
+/build*
+/bin
+/.vscode
+/.vs
+slang-glsl-module.bin
+/external/nvapi
+/external/ShaderMake
+/external/Vulkan-Headers

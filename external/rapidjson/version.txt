@@ -1,0 +1,2 @@
+https://github.com/Tencent/rapidjson
+git commit 7c73dd7de7c4f14379b781418c6e947ad464c818

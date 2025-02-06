@@ -1,0 +1,28 @@
+#include "VersionInfo.h"
+#include <windows.h>
+
+VS_VERSION_INFO VERSIONINFO
+    FILEVERSION     NTC_VERSION_MAJOR,NTC_VERSION_MINOR,NTC_VERSION_POINT,0
+    PRODUCTVERSION  NTC_VERSION_MAJOR,NTC_VERSION_MINOR,NTC_VERSION_POINT,0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "NVIDIA Corporation"
+            VALUE "FileDescription", "Neural Texture Compression Library"
+            VALUE "OriginalFilename", "libntc.dll"
+            VALUE "FileVersion", NTC_VERSION_FULL
+            VALUE "InternalName", "libntc"
+            VALUE "LegalCopyright", "Copyright (C) 2023-2025, NVIDIA CORPORATION. All rights reserved."
+            VALUE "ProductName", "Neural Texture Compression Library"
+            VALUE "ProductVersion", NTC_VERSION_FULL
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 0x4B0
+    END
+END
+
+LANGUAGE LANG_NEUTRAL, SUBLANG_DEFAULT

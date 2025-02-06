@@ -1,0 +1,9 @@
+*.dll filter=lfs diff=lfs merge=lfs -text
+*.lib filter=lfs diff=lfs merge=lfs -text
+*.pdb filter=lfs diff=lfs merge=lfs -text
+*.exe filter=lfs diff=lfs merge=lfs -text
+*.so filter=lfs diff=lfs merge=lfs -text
+
+external/slang/linux-x64/bin/slangc filter=lfs diff=lfs merge=lfs -text
+external/slang/linux-x64/bin/slangd filter=lfs diff=lfs merge=lfs -text
+external/dxc/linux-x64/bin/dxc filter=lfs diff=lfs merge=lfs -text

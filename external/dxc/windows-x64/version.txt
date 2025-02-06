@@ -1,0 +1,2 @@
+v1.8.2405 release
+https://github.com/microsoft/DirectXShaderCompiler/releases/tag/v1.8.2405
