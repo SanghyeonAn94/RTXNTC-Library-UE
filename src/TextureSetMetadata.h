@@ -12,7 +12,6 @@
 
 #pragma once
 
-#include "ChannelInfo.h"
 #include "StdTypes.h"
 #include <array>
 
@@ -21,6 +20,7 @@ struct NtcDecompressConstants;
 namespace ntc
 {
 
+class Context;
 class TextureMetadata;
 class GraphicsResources;
 struct MlpDesc;
@@ -52,7 +52,8 @@ struct ColorMipDesc
 class TextureSetMetadata : virtual public ITextureSetMetadata
 {
 public:
-    TextureSetMetadata(IAllocator* allocator, TextureSetDesc const& desc, LatentShape const& latentShape);
+    TextureSetMetadata(IAllocator* allocator, Context const* context, TextureSetDesc const& desc,
+        LatentShape const& latentShape);
 
     TextureSetDesc const& GetDesc() const override { return m_desc; }
     
@@ -72,22 +73,24 @@ public:
     Status GetFusedMipLevels(int mipLevel, int* pOutFirstFusedMip, int* pOutLastFusedMip) const override;
     int GetNumLatentImages() const override;
     Status GetMipLevelsForLatentImage(int latentImageIndex, int* pOutFirstColorMip, int* pOutLastColorMip) const override;
-    Status GetInferenceWeights(InferenceWeightType weightType, void const** pOutData, size_t* pOutSize) const override;
+    InferenceWeightType GetBestSupportedWeightType() const override;
+    Status GetInferenceWeights(InferenceWeightType weightType, void const** pOutData, size_t* pOutSize,
+        size_t* pOutConvertedSize) override;
+    Status ConvertInferenceWeights(InferenceWeightType weightType, void* commandList,
+        void* srcBuffer, uint64_t srcOffset, void* dstBuffer, uint64_t dstOffset) override;
     bool IsInferenceWeightTypeSupported(InferenceWeightType weightType) const override;
+    Status ShuffleInferenceOutputs(ShuffleSource mapping[NTC_MAX_CHANNELS]) override;
     
     Status LoadMetadataFromStream(json::Document const& document, uint64_t binaryChunkOffset,
         uint64_t binaryChunkSize, LatentShape const& latentShape, IStream* inputStream);
 
-    Status LoadWeightsFromStream(json::Document const& document, IStream* inputStream,
-        GraphicsResources const* GraphicsResources);
-
-    Vector<uint8_t> const* GetInferenceWeightVector(InferenceWeightType weightType) const;
+    Status LoadWeightsFromStream(json::Document const& document, IStream* inputStream);
     
     void GetWeightOffsets(InferenceWeightType weightType, int weightOffsets[NTC_MLP_LAYERS], int& scaleBiasOffset);
 
     uint64_t GetSourceStreamSize() const { return m_sourceStreamSize; }
 
-    uint32_t GetValidChannelMask() const;
+    uint32_t GetValidChannelMask() const override;
 
     uint32_t GetPackedColorSpaces() const;
 
@@ -99,8 +102,8 @@ public:
 
     void FillColorMipConstants(NtcColorMipConstants& colorMip, int mipLevel);
 
-    void FillDecompressionConstants(NtcDecompressConstants& output, InferenceWeightType weightType, int mipLevel,
-        Rect srcRect, Point dstOffset, OutputTextureDesc const* pOutputTextures, int numOutputTextures,
+    void FillDecompressionConstants(NtcDecompressConstants& output, InferenceWeightType weightType, int weightOffset,
+        int mipLevel, Rect srcRect, Point dstOffset, OutputTextureDesc const* pOutputTextures, int numOutputTextures,
         int firstOutputDescriptorIndex, uint64_t latentBufferOffset);
 
     bool ValidateBufferView(uint32_t view, uint64_t minSize, json::Document const& document);
@@ -112,6 +115,9 @@ public:
     LatentImageDesc const* GetLatentImageDesc(int neuralLod) const;
 
     int ColorMipToNeuralLod(int colorMip) const;
+    
+    bool ConvertWeightsForCoopVec(Vector<uint8_t> const& src, Vector<uint8_t>& dst,
+        bool useFP8, size_t& outWeightSize, int outWeightOffsets[4]);
 
     static void FillLatentEncodingConstants(NtcLatentEncodingConstants& encoding,
         int numFeatures, int quantBits, InferenceWeightType weightType);
@@ -128,26 +134,21 @@ public:
     
 protected:
     IAllocator* m_allocator;
+    Context const* m_context;
 
     TextureSetDesc m_desc{ };
     LatentShape m_latentShape = LatentShape::Empty();
     MlpDesc const* m_mlpDesc = nullptr;
     Vector<UniquePtr<TextureMetadata>> m_textureInfos;
-    ColorSpace m_channelColorSpaces[NTC_MAX_CHANNELS]{};
-    size_t m_rowMajorWeightSize = 0;
-    size_t m_coopVecWeightSizeInt8 = 0;
-    size_t m_coopVecWeightSizeFP8 = 0;
-    int m_coopVecWeightOffsetsInt8[NTC_MLP_LAYERS]{};
-    int m_coopVecWeightOffsetsFP8[NTC_MLP_LAYERS]{};
 
     uint64_t m_binaryChunkOffset = 0;
     uint64_t m_binaryChunkSize = 0;
     uint64_t m_sourceStreamSize = 0;
-    Vector<uint8_t> m_coopVecWeightDataInt8;
     Vector<uint8_t> m_rowMajorWeightDataInt8;
-    Vector<uint8_t> m_coopVecWeightDataFP8;
     Vector<uint8_t> m_rowMajorWeightDataFP8;
-    ChannelInfo m_channelInfos[NTC_MAX_CHANNELS];
+
+    std::array<ColorSpace, NTC_MAX_CHANNELS> m_channelColorSpaces;
+    std::array<ShuffleSource, NTC_MAX_CHANNELS> m_channelShuffleMapping;
 
     Vector<LatentImageDesc> m_latentImages;
     std::array<ColorMipDesc, NTC_MAX_MIPS> m_colorMips;

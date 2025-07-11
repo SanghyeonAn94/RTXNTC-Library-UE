@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include <libntc/ntc.h>
 #include <cstdint>
 #include <cstdlib>
 #include <libntc/shaders/InferenceConstants.h>
@@ -20,46 +21,31 @@ namespace ntc
 {
 
 class GraphicsResources;
+struct MlpDesc;
+struct WeightLayout;
 
 class CoopVecWeightConverter
 {
 public:
-    CoopVecWeightConverter(GraphicsResources const* resources, bool useFP8, int inputChannels, int hiddenChannels,
-        int outputChannels, int numHiddenLayers);
+    static bool IsConversionSupported(GraphicsResources const* resources, InferenceWeightType weightType);
 
-    bool IsConversionSupported() const { return m_isSupported; }
-    size_t GetConvertedWeightSize() const { return m_dstTotalSize; }
-    size_t GetSourceWeightSize() const { return m_srcTotalSize; }
+    static bool GetWeightLayout(GraphicsResources const* resources, MlpDesc const& mlpDesc,
+        InferenceWeightType weightType, WeightLayout& outLayout);
 
-    void ConvertWeights(const uint8_t* src, uint8_t* dst);
-    void GetConvertedWeightOffsets(int weightOffsets[NTC_MLP_LAYERS]);
+    static void ConvertWeights(GraphicsResources const* resources, MlpDesc const& mlpDesc,
+        WeightLayout const& srcLayout, void* srcBuffer, uint64_t srcOffset,
+        WeightLayout const& dstLayout, void* dstBuffer, uint64_t dstOffset,
+        void* commandListOrBuffer);
 
-    // These are mostly just NVAPI function wrappers that let us avoid including nvapi.h
-    // into other source files (makes Intellisense slow)
+    static bool IsCoopVecWeightType(InferenceWeightType weightType);
+    static InferenceWeightType GetGenericWeightType(InferenceWeightType weightType);
+
 #if NTC_WITH_DX12
-    static bool InitializeNVAPI();
     static void IsDX12CoopVecSupported(GraphicsResources const* resources, bool& outInt8Supported, bool& outFP8Supported);
-    static void UnloadNVAPI();
 #endif
 #if NTC_WITH_VULKAN
     static void IsVkCoopVecSupported(GraphicsResources const* resources, bool& outInt8Supported, bool& outFP8Supported);
 #endif
-
-private:
-    GraphicsResources const* m_resources;
-    bool m_useFP8;
-    bool m_isSupported;
-    int m_inputChannels = 0;
-    int m_hiddenChannels = 0;
-    int m_outputChannels = 0;
-    int m_numHiddenLayers = 0;
-    size_t m_srcTotalSize = 0;
-    size_t m_dstTotalSize = 0;
-    size_t m_dstWeightSizeInput = 0;
-    size_t m_dstWeightSizeHidden = 0;
-    size_t m_dstWeightSizeOutput = 0;
-
-    void CalculateOutputSizes();
 };
 
 }

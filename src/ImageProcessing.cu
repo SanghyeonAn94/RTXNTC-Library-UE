@@ -207,12 +207,12 @@ __global__ void ResizeMultichannelImageKernel(
 void ResizeMultichannelImage(
     PitchLinearImageSlice src,
     PitchLinearImageSlice dst,
-    ColorSpace channelColorSpaces[NTC_MAX_CHANNELS])
+    std::array<ColorSpace, NTC_MAX_CHANNELS> const& channelColorSpaces)
 {
     dim3 threadBlockSize(16, 16, 1);
     dim3 gridSize((dst.width + threadBlockSize.x - 1) / threadBlockSize.x, (dst.height + threadBlockSize.y - 1) / threadBlockSize.y, 1);
 
-    cudaMemcpyToSymbol(g_ChannelColorSpaces, channelColorSpaces, sizeof(ColorSpace) * NTC_MAX_CHANNELS);
+    cudaMemcpyToSymbol(g_ChannelColorSpaces, channelColorSpaces.data(), sizeof(ColorSpace) * NTC_MAX_CHANNELS);
 
     ResizeMultichannelImageKernel <<< gridSize, threadBlockSize >>> (src, dst);
 }

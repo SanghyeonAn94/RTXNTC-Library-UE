@@ -12,6 +12,7 @@
 
 #pragma once
 #include <libntc/ntc.h>
+#include <array>
 
 namespace ntc
 {
@@ -70,7 +71,7 @@ namespace ntc::cuda
 void ResizeMultichannelImage(
     PitchLinearImageSlice src,
     PitchLinearImageSlice dst,
-    ColorSpace channelColorSpaces[NTC_MAX_CHANNELS]);
+    std::array<ColorSpace, NTC_MAX_CHANNELS> const& channelColorSpaces);
 
 void CopyImage(
     PitchLinearImageSlice src,

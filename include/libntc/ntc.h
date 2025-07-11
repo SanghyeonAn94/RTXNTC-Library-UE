@@ -37,7 +37,7 @@ namespace ntc
 {
 
 // Update the interface version whenever changes to the LibNTC API are made.
-constexpr uint32_t InterfaceVersion = 0x25'01'24'01; // Year, month, day, ordinal
+constexpr uint32_t InterfaceVersion = 0x25'06'06'00; // Year, month, day, ordinal
 
 // Version information for the library, see GetLibraryVersion()
 struct VersionInfo
@@ -285,10 +285,13 @@ enum class GraphicsAPI
 
 enum class InferenceWeightType
 {
-    GenericInt8,
-    GenericFP8,
-    CoopVecInt8,
-    CoopVecFP8
+    Unknown = 0,
+    GenericInt8 = 1,
+    GenericFP8 = 2,
+    CoopVecInt8 = 3,
+    CoopVecFP8 = 4,
+
+    Count
 };
 
 struct SharedTextureDesc
@@ -354,7 +357,8 @@ public:
 // Whether the structures actually fit is verified inside LibNTC using static_assert.
 static constexpr size_t MaxComputePassConstantSize = 43*16;
 
-// The ComputePassDesc structure holds information necessary to create and run a compute pass using a graphics API (DX12 or Vulkan).
+// The ComputePassDesc structure holds information necessary to create and run a compute pass using a graphics API
+// (DX12 or Vulkan).
 struct ComputePassDesc
 {
     // Bytecode for the compute shader. 
@@ -366,12 +370,6 @@ struct ComputePassDesc
     // Data for the constant buffer to be used by the compute shader.
     uint8_t constantBufferData[MaxComputePassConstantSize];
     size_t constantBufferSize = 0;
-
-    // Data for the weight buffer to be used by the decompression compute shader. Will be NULL for other shaders.
-    // The pointer references a buffer owned by the ITextureSetMetadata object and will become invalid if that object is destroyed.
-    // The buffer contents are static during the lifetime of ITextureSetMetadata.
-    const void* weightBufferData = nullptr;
-    size_t weightBufferSize = 0;
 
     // Dispatch dimensions for the compute shader.
     int dispatchWidth = 0;
@@ -454,6 +452,67 @@ public:
 };
 
 
+// Defines the type of source for a single channel in the ShuffleInferenceOutputs(...) operation.
+enum class ShuffleSourceType
+{
+    // The channel will output zero, and its valid mask bit will NOT be set
+    Undefined,
+    // The channel will output the contents of the specified source channel
+    Channel,
+    // The channel will output the specified constant, and its valid mask bit WILL be set
+    Constant
+};
+
+struct ShuffleSource
+{
+    ShuffleSourceType type = ShuffleSourceType::Undefined;
+
+    union
+    {
+        // Zero-based index of the source channel to shuffle from.
+        // Valid when type == Channel.
+        int channelIndex;
+
+        // Constant value.
+        // Valid when type == Constant.
+        float constantValue;
+    };
+
+    ShuffleSource()
+        : channelIndex(0)
+    { }
+
+    int GetChannelIndex() const
+    {
+        return (type == ShuffleSourceType::Channel) ? channelIndex : -1;
+    }
+
+    // Constructor that returns an Undefined source
+    static ShuffleSource Undefined()
+    {
+        return ShuffleSource();
+    }
+
+    // Constructor that returns a Channel source
+    static ShuffleSource Channel(int index)
+    {
+        ShuffleSource result;
+        result.type = ShuffleSourceType::Channel;
+        result.channelIndex = index;
+        return result;
+    }
+
+    // Constructor that returns a Constant source
+    static ShuffleSource Constant(float value)
+    {
+        ShuffleSource result;
+        result.type = ShuffleSourceType::Constant;
+        result.constantValue = value;
+        return result;
+    }
+};
+
+
 // The ITextureSetMetadata interface is used to provide information about texture set contents without allocating memory
 // for the actual texture data. This should be useful when decompressing textures at game load time,
 // so that the engine can pre-allocate the textures and then launch decompression kernels.
@@ -505,15 +564,57 @@ public:
 
     // Returns the range of color MIP levels that are encoded by the same latent image.
     // When no such MIP levels exist, returns OutOfRange and the output parameters are unchanged.
-    virtual Status GetMipLevelsForLatentImage(int latentImageIndex, int* pOutFirstColorMip, int* pOutLastColorMip) const = 0;
+    virtual Status GetMipLevelsForLatentImage(int latentImageIndex, int* pOutFirstColorMip,
+        int* pOutLastColorMip) const = 0;
+
+    // Returns a weight type available in this texture set and supported by the current GPU that should result
+    // in the fastest inference. Prefers CoopVecFP8, then CoopVecInt8, and then GenericInt8. If no supported weights
+    // are present in the texture set, returns Unknown.
+    virtual InferenceWeightType GetBestSupportedWeightType() const = 0;
     
     // Returns a pointer and size for the data that should be uploaded to the weight buffer
     // that is passed to NtcSampleTextureSet(...) in shaders using this texture set.
-    virtual Status GetInferenceWeights(InferenceWeightType weightType, void const** pOutData, size_t* pOutSize) const = 0;
+    // When a CoopVec weight type is requested, the *pOutConvertedSize value will be set to the size of the
+    // memory block that the application needs to allocate for the converted weights. The conversion happens
+    // on the GPU by calling ConvertInferenceWeights(...) with a command list or buffer
+    // and executing that command list or buffer.
+    virtual Status GetInferenceWeights(InferenceWeightType weightType, void const** pOutData, size_t* pOutSize,
+        size_t* pOutConvertedSize) = 0;
 
+    // Converts the inference weights into the specified layout on the GPU.
+    // The source data should be obtained previously by calling GetInferenceWeights(...) with the same 'weightType' and
+    // uploaded to GPU accessible memory in 'srcBuffer' at offset 'srcOffset'. The converted data is written into
+    // 'dstBuffer' at offset 'dstOffset', where at least '*pOutConvertedSize' bytes should be available, as returned
+    // by GetInferenceWeights(...).
+    // The 'commandList' parameter must point to a valid and open ID3D12GraphicsCommandList (DX12) or
+    // VkCommandBuffer (VK) object. Commands will be recorded into that list, but no barriers will be placed there.
+    // The 'srcBuffer' and 'dstBuffer' parameters must point to valid ID3D12Resource (DX12) or VkBuffer (VK) objects.
+    // Using the same buffer as source and destination is not allowed.
+    virtual Status ConvertInferenceWeights(InferenceWeightType weightType, void* commandList,
+        void* srcBuffer, uint64_t srcOffset, void* dstBuffer, uint64_t dstOffset) = 0;
+        
     // Returns true if the given inference weight type is included with this texture set
     // and available on the current graphics device.
     virtual bool IsInferenceWeightTypeSupported(InferenceWeightType weightType) const = 0;
+
+    // Rearranges the inference weights so that the color outputs are permuted in the specified way.
+    // Each element in the 'mapping' array contains the source information for one output channel,
+    // and its position in the array is the index of the channel after shuffling.
+    // The source can be either a channel index or a constant value, see ShuffleSource.
+    // If it's an index, the mapping works like this:
+    //   newOutputs[channel] = oldOutputs[mapping[channel].channelIndex]
+    // Notes:
+    // - This operation cannot be undone in a general case. If the mapping is bijective, the reverse
+    //   mapping can be applied to restore the original channel order.
+    // - The shuffling does not affect the metadata such as texture channel indices, nor does it affect
+    //   the weights used by the texture set on the compression (CUDA) side.
+    // - Weights returned by `GetInferenceWeights` are invalidated by this operation, and new weights 
+    //   must be obtained to make the changes effective in a renderer.
+    virtual Status ShuffleInferenceOutputs(ShuffleSource mapping[NTC_MAX_CHANNELS]) = 0;
+
+    // Returns a bitmap indicating which channels in the inference output contain valid data.
+    // The mask is adjusted for any prior ShuffleInferenceOutputs(...) operations.
+    virtual uint32_t GetValidChannelMask() const = 0;
 
     virtual ~ITextureSetMetadata() = default;
 };
@@ -844,6 +945,16 @@ struct MakeDecompressionComputePassParameters
     // Specifies which part of the input stream or file is available as a latent buffer.
     StreamRange latentStreamRange = EntireStream;
 
+    // Specifies which version of the inference weights is to be used for decompression.
+    // The weights must be obtained using ITextureSetMetadata::GetInferenceWeights(...) and optionally converted
+    // to a CoopVec compatible layout using ITextureSetMetadata::ConvertInferenceWeights(...).
+    // IContext::MakeDecompressionComputePass(...) will select the right shader version based on the specified
+    // weightType and GPU feature support.
+    InferenceWeightType weightType = InferenceWeightType::Unknown;
+
+    // Offset of the inference weights in the weight buffer.
+    int weightOffset = 0;
+
     // Mip level from the NTC texture set.
     int mipLevel = 0;
 
@@ -861,10 +972,6 @@ struct MakeDecompressionComputePassParameters
     // If not specified, the mapping is derived from the metadata.
     OutputTextureDesc const* pOutputTextures = nullptr;
     int numOutputTextures = 0;
-
-    // Controls whether the FP8 version of decompression math should be used, if supported by the device
-    // and if the weights are present in the texture set. FP8 decompression is somewhat faster but has higher error.
-    bool enableFP8 = false;
 };
 
 struct MakeBlockCompressionComputePassParameters
@@ -993,7 +1100,7 @@ public:
     // The following resources need to be bound to the pipeline:
     // - ConstantBuffer at b0 containing the CB data (ComputePassDecs::constantBufferData) (Vulkan: dset 0, binding 0)
     // - ByteAddressBuffer at t1 containing the latent data (the latentStreamRange portion of the compressed stream) (Vulkan: dset 0, binding 1)
-    // - ByteAddressBuffer at t2 containing the weight data (ComputePassDecs::weightBufferData) (Vulkan: dset 0, binding 2)
+    // - ByteAddressBuffer at t2 containing the weight data (ITextureSetMetadata::GetInferenceWeights) (Vulkan: dset 0, binding 2)
     // - Unsized array of RWTexture2D<float4> at u0... containing the UAVs for the destination textures (Vulkan: dset 1, binding 0)
     // If this function returns Status::ShaderUnavailable, the rest of the data in 'pOutComputePass' is still valid.
     virtual Status MakeDecompressionComputePass(MakeDecompressionComputePassParameters const& params,

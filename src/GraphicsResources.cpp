@@ -28,14 +28,11 @@ GraphicsResources::GraphicsResources(ContextParameters const& params)
 #if NTC_WITH_DX12
         m_d3d12Device = static_cast<ID3D12Device*>(params.d3d12Device);
 
-        m_nvapiInitialized = CoopVecWeightConverter::InitializeNVAPI();
-        if (m_nvapiInitialized && (params.enableCooperativeVectorInt8 || params.enableCooperativeVectorFP8))
+        if (params.enableCooperativeVectorInt8 ||
+            params.enableCooperativeVectorFP8)
         {
-            CoopVecWeightConverter::IsDX12CoopVecSupported(this, m_coopVecInt8Supported, m_coopVecFP8Supported);
-            if (!params.enableCooperativeVectorInt8)
-                m_coopVecInt8Supported = false;
-            if (!params.enableCooperativeVectorFP8)
-                m_coopVecFP8Supported = false;
+            CoopVecWeightConverter::IsDX12CoopVecSupported(this, m_coopVecInt8Supported,
+                m_coopVecFP8Supported);
         }
 #endif
     }
@@ -51,16 +48,25 @@ GraphicsResources::GraphicsResources(ContextParameters const& params)
             m_vulkanLoader->getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr");
         if (vkGetInstanceProcAddr)
         {
-            m_vkGetPhysicalDeviceCooperativeVectorPropertiesNV = (PFN_vkGetPhysicalDeviceCooperativeVectorPropertiesNV)
-                vkGetInstanceProcAddr(m_vulkanInstance, "vkGetPhysicalDeviceCooperativeVectorPropertiesNV");
+            #define LOAD_INSTANCE_FN(name) pfn_##name = (PFN_##name)vkGetInstanceProcAddr(m_vulkanInstance, #name)
+
+            LOAD_INSTANCE_FN(vkGetPhysicalDeviceCooperativeVectorPropertiesNV);
+            
+            #undef LOAD_INSTANCE_FN
         }
 
         PFN_vkGetDeviceProcAddr const vkGetDeviceProcAddr =
             m_vulkanLoader->getProcAddress<PFN_vkGetDeviceProcAddr>("vkGetDeviceProcAddr");
         if (vkGetDeviceProcAddr)
         {
-            m_vkConvertCooperativeVectorMatrixNV = (PFN_vkConvertCooperativeVectorMatrixNV)
-                vkGetDeviceProcAddr(m_vulkanDevice, "vkConvertCooperativeVectorMatrixNV");
+            #define LOAD_DEVICE_FN(name) pfn_##name = (PFN_##name)vkGetDeviceProcAddr(m_vulkanDevice, #name)
+
+            LOAD_DEVICE_FN(vkCmdConvertCooperativeVectorMatrixNV);
+            LOAD_DEVICE_FN(vkCmdCopyBuffer);
+            LOAD_DEVICE_FN(vkConvertCooperativeVectorMatrixNV);
+            LOAD_DEVICE_FN(vkGetBufferDeviceAddress);
+
+            #undef LOAD_DEVICE_FN
         }
 
         PFN_vkGetPhysicalDeviceProperties const vkGetPhysicalDeviceProperties =
@@ -70,16 +76,19 @@ GraphicsResources::GraphicsResources(ContextParameters const& params)
             vkGetPhysicalDeviceProperties(m_vulkanPhysicalDevice, &m_vulkanPhysicalDeviceProperties);
         }
 
-        if (params.enableCooperativeVectorInt8 || params.enableCooperativeVectorFP8)
+        if (params.enableCooperativeVectorInt8 ||
+            params.enableCooperativeVectorFP8)
         {
-            CoopVecWeightConverter::IsVkCoopVecSupported(this, m_coopVecInt8Supported, m_coopVecFP8Supported);
-            if (!params.enableCooperativeVectorInt8)
-                m_coopVecInt8Supported = false;
-            if (!params.enableCooperativeVectorFP8)
-                m_coopVecFP8Supported = false;
+            CoopVecWeightConverter::IsVkCoopVecSupported(this, m_coopVecInt8Supported,
+                m_coopVecFP8Supported);
         }
 #endif
     }
+
+    if (!params.enableCooperativeVectorInt8)
+        m_coopVecInt8Supported = false;
+    if (!params.enableCooperativeVectorFP8)
+        m_coopVecFP8Supported = false;
 }
 
 GraphicsResources::~GraphicsResources()
@@ -90,14 +99,6 @@ GraphicsResources::~GraphicsResources()
         m_vulkanLoader->~DynamicLoader();
         m_allocator->Deallocate(m_vulkanLoader, sizeof(VulkanDynamicLoader));
         m_vulkanLoader = nullptr;
-    }
-#endif
-
-#if NTC_WITH_DX12
-    if (m_nvapiInitialized)
-    {
-        CoopVecWeightConverter::UnloadNVAPI();
-        m_nvapiInitialized = false;
     }
 #endif
 }

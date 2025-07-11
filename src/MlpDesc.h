@@ -12,6 +12,10 @@
 
 #pragma once
 
+#include <libntc/ntc.h>
+#include <libntc/shaders/InferenceConstants.h>
+#include <cstddef>
+
 namespace ntc
 {
 
@@ -25,7 +29,7 @@ struct MlpDesc
     int highResFeatures;
     int lowResFeatures;
     int inputChannels;
-    
+
     int GetInputChannels() const { return inputChannels; }
     int GetHiddenChannels() const;
     int GetOutputChannels() const;
@@ -58,6 +62,33 @@ struct MlpDesc
     // Finds the smallest MLP version that can fit the specified feature counts.
     // If no such version found, returns nullptr.
     static MlpDesc const* PickOptimalConfig(int highResFeatures, int lowResFeatures);
+};
+
+enum class DataType
+{
+    None,
+    Int8,
+    Int32,
+    FP8,
+    FP16,
+    FP32
+};
+
+struct Span
+{
+    size_t offset = 0;
+    size_t size = 0;
+    DataType type = DataType::None;
+};
+
+struct WeightLayout
+{
+    Span weights[NTC_MLP_LAYERS]{};
+    Span combinedWeights;
+    Span scales[NTC_MLP_LAYERS]{};
+    Span biases[NTC_MLP_LAYERS]{};
+    Span combinedScaleBias;
+    size_t bufferSize = 0;
 };
 
 }

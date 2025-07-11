@@ -314,6 +314,8 @@ const char* InferenceWeightTypeToString(InferenceWeightType weightType)
 {
     switch(weightType)
     {
+    case InferenceWeightType::Unknown:
+        return "Unknown";
     case InferenceWeightType::GenericInt8:
         return "GenericInt8";
     case InferenceWeightType::GenericFP8:

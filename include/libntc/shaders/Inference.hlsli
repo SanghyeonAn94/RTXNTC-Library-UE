@@ -412,10 +412,11 @@ NTC_TEMPLATE_FN_3(void, NtcEvaluateLayerINT8, int, IN, int, OUT, bool, OUTPUT_LA
     // and the resulting code works slower than a regular loop.
     for (uint c = 0; c < OUT; c += 4)
     {
-        int acc0 = 0;
-        int acc1 = 0;
-        int acc2 = 0;
-        int acc3 = 0;
+        int4 biases = weightBuffer.Load<int4>(scaleBiasOffset + (totalChannels + c) * 4);
+        int acc0 = biases.x;
+        int acc1 = biases.y;
+        int acc2 = biases.z;
+        int acc3 = biases.w;
         
         [unroll]
         for (uint k = 0; k < IN / 4; k++)
@@ -437,14 +438,12 @@ NTC_TEMPLATE_FN_3(void, NtcEvaluateLayerINT8, int, IN, int, OUT, bool, OUTPUT_LA
             acc3 += DotProductInt8x4(inputArray[k], weights3);
 #endif
         }
-
+        
         float4 results = float4(acc0, acc1, acc2, acc3);
-
         float4 scales = weightBuffer.Load<float4>(scaleBiasOffset + c * 4);
-        float4 biases = weightBuffer.Load<float4>(scaleBiasOffset + (totalChannels + c) * 4);
 
 #if NTC_USE_FLOAT16
-        float16_t4 hresults = float16_t4(results * scales + biases);
+        float16_t4 hresults = float16_t4(results * scales);
         
         if (activation)
         {
@@ -463,7 +462,7 @@ NTC_TEMPLATE_FN_3(void, NtcEvaluateLayerINT8, int, IN, int, OUT, bool, OUTPUT_LA
             outputArray[c / 4] = NtcPackInt8x4(iresults);
         }
 #else
-        float4 hresults = results * scales + biases;
+        float4 hresults = results * scales;
         
         if (activation)
         {

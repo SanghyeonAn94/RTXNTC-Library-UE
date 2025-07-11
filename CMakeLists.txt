@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2023-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 #
 # NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
@@ -10,6 +10,7 @@
 
 cmake_minimum_required(VERSION 3.18)
 include(FetchContent)
+include(tools/ConfigureCompilers.cmake)
 
 set(LANGUAGES CXX)
 
@@ -32,7 +33,7 @@ project(
 # Version info
 
 set(NTC_VERSION_MAJOR 0)
-set(NTC_VERSION_MINOR 5)
+set(NTC_VERSION_MINOR 7)
 set(NTC_VERSION_POINT 0)
 
 # Read Git branch name into NTC_VERSION_BRANCH
@@ -58,6 +59,9 @@ message(STATUS "LibNTC version: ${NTC_VERSION_MAJOR}.${NTC_VERSION_MINOR}.${NTC_
 if ("${CMAKE_CURRENT_SOURCE_DIR}" STREQUAL "${CMAKE_SOURCE_DIR}")
     set (LIBNTC_IS_SUBMODULE OFF)
     set (LIBNTC_BIN_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bin")
+    if (MSVC)
+        set (CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    endif ()
 else()
     set (LIBNTC_IS_SUBMODULE ON)
 endif()
@@ -68,41 +72,31 @@ if (NOT TARGET Vulkan-Headers AND NOT TARGET Vulkan::Headers AND NTC_WITH_VULKAN
         Vulkan-Headers
         GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
         GIT_TAG v1.4.307
-        SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/Vulkan-Headers"
     )
     FetchContent_MakeAvailable(Vulkan-Headers)
 endif()
 
+# Include DirectX-Headers if it hasn't been included before and if it's needed
+if (NOT TARGET DirectX-Headers AND NTC_WITH_DX12)
+    FetchContent_Declare(
+        DirectX-Headers
+        GIT_REPOSITORY https://github.com/microsoft/DirectX-Headers.git
+        GIT_TAG v1.717.0-preview
+    )
+    FetchContent_MakeAvailable(DirectX-Headers)
+endif()
+
 # Include ShaderMake if it hasn't been included before and if it's needed
 if (NOT TARGET ShaderMake AND NTC_WITH_PREBUILT_SHADERS AND (NTC_WITH_DX12 OR NTC_WITH_VULKAN))
-    set(SHADERMAKE_SEARCH_FOR_COMPILERS OFF CACHE BOOL "")
+    LibNTC_ConfigureShaderCompilerVersions()
+
     set(SHADERMAKE_BIN_OUTPUT_PATH "${CMAKE_CURRENT_BINARY_DIR}/ShaderMake" CACHE STRING "")
     FetchContent_Declare(
         ShaderMake
         GIT_REPOSITORY https://github.com/NVIDIAGameWorks/ShaderMake.git
-        GIT_TAG 94406cff724a967b9e8bea308367e14e54a6d0da
-        SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/ShaderMake"
+        GIT_TAG de47d8677843ee2fd1a231b94970e71818252a62
     )
     FetchContent_MakeAvailable(ShaderMake)
-endif()
-
-# Include NVAPI if it hasn't been included before and if we're building for Windows with DX12 support.
-# If the upper level project provides its own copy of NVAPI, make sure it's declared as a CMake target 'nvapi'
-# and it's using NVAPI SDK R570 or newer.
-if (NOT TARGET nvapi AND WIN32 AND NTC_WITH_DX12)
-    set(NTC_NVAPI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/nvapi")
-
-    FetchContent_Declare(
-        nvapi
-        GIT_REPOSITORY https://github.com/NVIDIA/nvapi.git
-        GIT_TAG d08488fcc82eef313b0464db37d2955709691e94
-        SOURCE_DIR "${NTC_NVAPI_DIR}"
-    )
-    FetchContent_MakeAvailable(nvapi)
-    
-    add_library(nvapi STATIC IMPORTED GLOBAL)
-    target_include_directories(nvapi INTERFACE "${NTC_NVAPI_DIR}")
-    set_property(TARGET nvapi PROPERTY IMPORTED_LOCATION "${NTC_NVAPI_DIR}/amd64/nvapi64.lib")
 endif()
 
 if (MSVC AND NOT LIBNTC_IS_SUBMODULE)
@@ -111,3 +105,5 @@ endif()
 
 add_subdirectory(external/rapidjson)
 add_subdirectory(src)
+
+LibNTC_CopyDXCompilerDLLs()

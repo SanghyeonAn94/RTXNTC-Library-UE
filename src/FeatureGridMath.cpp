@@ -56,11 +56,6 @@ int FeatureGridMath::LodToNeuralLod(int lod, int highResGridScale, int neuralLod
     return std::min(neuralLods - 1, std::max(0, lod - Log2i(highResGridScale)) / NeuralMipRatio);
 }
 
-int FeatureGridMath::NeuralLodToColorLod(int neuralLod, int highResGridScale)
-{
-    return (neuralLod == 0) ? 0 : (neuralLod * NeuralMipRatio) + Log2i(highResGridScale);
-}
-
 int FeatureGridMath::GetGridDimension(Grid grid, int imageDimension, int neuralLod, int highResScale)
 {
     int scale = (grid == Grid::HighRes) ? highResScale : (highResScale * 2);

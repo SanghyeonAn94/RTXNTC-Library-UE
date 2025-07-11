@@ -14,6 +14,9 @@
 
 #include <libntc/ntc.h>
 #include <memory>
+#include <array>
+#include <optional>
+#include "MlpDesc.h"
 
 namespace ntc
 {
@@ -93,10 +96,15 @@ public:
 
     GraphicsResources const* GetGraphicsResources() const { return m_graphicsResources; }
 
+    WeightLayout const* GetWeightLayout(int networkVersion, InferenceWeightType weightType) const;
+
 private:
     IAllocator* m_allocator;
     int m_cudaDevice = -1;
     GraphicsResources* m_graphicsResources = nullptr;
+    std::array<std::optional<WeightLayout>, NTC_NETWORK_COUNT * (size_t(InferenceWeightType::Count) - 1)> m_weightLayouts{};
+
+    static int GetWeightLayoutArrayIndex(int networkVersion, InferenceWeightType weightType);
 };
 
 }

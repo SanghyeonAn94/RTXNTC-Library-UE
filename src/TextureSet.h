@@ -13,6 +13,7 @@
 #pragma once
 
 #include <libntc/ntc.h>
+#include "ChannelInfo.h"
 #include "FeatureGridHost.h"
 #include "ImageProcessing.h"
 #include "TextureSetMetadata.h"
@@ -95,7 +96,6 @@ public:
     void SetExperimentalKnob(float value) override;
 
 private:
-    Context const* m_context;
     TextureSetFeatures m_features{};
     std::array<uint64_t, NTC_MAX_MIPS+1> m_textureMipOffsets{};
     int m_maskChannelIndex = -1;
@@ -110,14 +110,14 @@ private:
     DeviceAndHostArray<float> m_lossReduction;
     DeviceArray<half> m_mlpWeightsBase;
     DeviceArray<half> m_mlpWeightsQuantized;
-    DeviceAndHostArray<int8_t> m_lowPrecMlpData;
+    DeviceAndHostArray<uint8_t> m_mlpDataInt8;
+    DeviceAndHostArray<uint8_t> m_mlpDataFP8;
      // declared as uint32_t, used as either float or half depending on 'stableTraining'
     DeviceArray<uint32_t> m_weightGradients;
     DeviceArray<float> m_mlpMoment1;
     DeviceArray<float> m_mlpMoment2;
 
     int m_numNetworkParams = 0;
-    size_t m_mlpDataSizeInt8 = 0;
     
     CompressionSettings m_compressionSettings{};
     int m_currentStep = 0;
@@ -137,7 +137,7 @@ private:
 
     PitchLinearImageSlice GetTextureDataSlice(TextureDataPage page, int mipLevel, int firstChannel, int numChannels);
 
-    Status ComputeChannelNormalizationParameters();
+    Status ComputeChannelNormalizationParameters(std::array<ChannelInfo, NTC_MAX_CHANNELS>& outChannelInfos);
 };
 
 #ifdef _MSC_VER

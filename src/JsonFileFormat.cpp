@@ -55,6 +55,7 @@ static auto const ActivationTypeEnum = MakeEnumSchema({
 
 static auto const MlpDataTypeEnum = MakeEnumSchema({
     EnumValue(MlpDataType::Int8,      "Int8"),
+    EnumValue(MlpDataType::Int32,     "Int32"),
     EnumValue(MlpDataType::FloatE4M3, "FloatE4M3"),
     EnumValue(MlpDataType::FloatE5M2, "FloatE5M2"),
     EnumValue(MlpDataType::Float16,   "Float16"),
@@ -69,6 +70,8 @@ static auto const MLPLayerSchema = MakeObjectSchema("MLPLayer", {
     Field::UInt("biasView",             &MLPLayer::biasView),
     Field::OptionalEnum("weightType",   &MLPLayer::weightType, MlpDataTypeEnum),
     Field::OptionalEnum("scaleBiasType",&MLPLayer::scaleBiasType, MlpDataTypeEnum),
+    Field::OptionalEnum("scaleType",    &MLPLayer::scaleType, MlpDataTypeEnum),
+    Field::OptionalEnum("biasType",     &MLPLayer::biasType, MlpDataTypeEnum),
 });
 
 static ArrayOfObjectHandler<MLPLayer> const ArrayOfMLPLayerHandler(MLPLayerSchema);
@@ -77,8 +80,8 @@ static auto const MLPSchema = MakeObjectSchema("MLP", {
     Field::ArrayOfObject("layers",       &MLP::layers, ArrayOfMLPLayerHandler),
     Field::OptionalEnum("activation",    &MLP::activation, ActivationTypeEnum),
     Field::OptionalEnum("weightLayout",  &MLP::weightLayout, MatrixLayoutEnum),
-    Field::Enum("weightType",            &MLP::weightType, MlpDataTypeEnum),
-    Field::Enum("scaleBiasType",         &MLP::scaleBiasType, MlpDataTypeEnum),
+    Field::OptionalEnum("weightType",    &MLP::weightType, MlpDataTypeEnum),
+    Field::OptionalEnum("scaleBiasType", &MLP::scaleBiasType, MlpDataTypeEnum),
 });
 
 static OptionalObjectHandler<MLP> const OptionalMLPHandler(MLPSchema);
@@ -125,8 +128,6 @@ static auto const TextureSchema = MakeObjectSchema("Texture", {
 static ArrayOfObjectHandler<Texture> const ArrayOfTextureHandler(TextureSchema);
 
 static auto const ChannelSchema = MakeObjectSchema("Channel", {
-    Field::Float("scale",             &Channel::scale),
-    Field::Float("bias",              &Channel::bias),
     Field::OptionalEnum("colorSpace", &Channel::colorSpace, ColorSpaceEnum),
 });
 

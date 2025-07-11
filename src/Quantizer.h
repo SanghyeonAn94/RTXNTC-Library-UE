@@ -36,6 +36,16 @@ void ConvertNetworkFromQuantizedToFp16(
     int8_t* __restrict__ inputData,
     bool useFP8);
 
+void ExportNetworkIntoRowMajorLayout(
+    MlpDesc const* mlpDesc,
+    half* __restrict__ halfWeights,
+    half* __restrict__ outputData);
+
+void ImportNetworkFromRowMajorLayout(
+    MlpDesc const* mlpDesc,
+    half* __restrict__ halfWeights,
+    half* __restrict__ outputData);
+
 void FreezeQuantization(
     int    dispatchSize,
     int    quantizationBits,

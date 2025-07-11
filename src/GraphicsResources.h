@@ -46,7 +46,7 @@ public:
     bool IsCoopVecInt8Supported() const { return m_coopVecInt8Supported; }
 
     bool IsCoopVecFP8Supported() const { return m_coopVecFP8Supported; }
-
+    
 #if NTC_WITH_VULKAN
     VkDevice GetVulkanDevice() const { return m_vulkanDevice; }
 
@@ -54,11 +54,14 @@ public:
 
     VkPhysicalDeviceProperties const& GetVulkanPhysicalDeviceProperties() const { return m_vulkanPhysicalDeviceProperties; }
 
-    PFN_vkGetPhysicalDeviceCooperativeVectorPropertiesNV GetGetPhysicalDeviceCooperativeVectorPropertiesNV() const
-    { return m_vkGetPhysicalDeviceCooperativeVectorPropertiesNV; }
+#define DECLARE_VULKAN_PFN(name) PFN_##name pfn_##name = nullptr
+    DECLARE_VULKAN_PFN(vkCmdConvertCooperativeVectorMatrixNV);
+    DECLARE_VULKAN_PFN(vkCmdCopyBuffer);
+    DECLARE_VULKAN_PFN(vkConvertCooperativeVectorMatrixNV);
+    DECLARE_VULKAN_PFN(vkGetBufferDeviceAddress);
+    DECLARE_VULKAN_PFN(vkGetPhysicalDeviceCooperativeVectorPropertiesNV);
+#undef DECLARE_VULKAN_PFN
 
-    PFN_vkConvertCooperativeVectorMatrixNV GetConvertCooperativeVectorMatrixNV() const
-    { return m_vkConvertCooperativeVectorMatrixNV; }
 #endif
 #if NTC_WITH_DX12
     ID3D12Device* GetD3D12Device() const { return m_d3d12Device; }
@@ -85,8 +88,6 @@ private:
     VkPhysicalDevice m_vulkanPhysicalDevice = nullptr;
     VkDevice m_vulkanDevice = nullptr;
     VkPhysicalDeviceProperties m_vulkanPhysicalDeviceProperties{};
-    PFN_vkGetPhysicalDeviceCooperativeVectorPropertiesNV m_vkGetPhysicalDeviceCooperativeVectorPropertiesNV = nullptr;
-    PFN_vkConvertCooperativeVectorMatrixNV m_vkConvertCooperativeVectorMatrixNV = nullptr;
 #endif
 
 #if NTC_WITH_DX12

@@ -1,6 +1,0 @@
-https://github.com/shader-slang/slang/
-v2025.3.3
-
-Windows build includes custom DXC from https://github.com/NVIDIA-RTX/DirectXShaderCompiler
-branch 'CooperativeVector'
-commit ef1472a14a0d8b85e5f0807d985f739eb47bb9e9

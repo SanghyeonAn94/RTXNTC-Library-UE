@@ -35,8 +35,6 @@ public:
 
     static int LodToNeuralLod(int lod, int highResGridScale, int neuralLods);
 
-    static int NeuralLodToColorLod(int neuralLod, int highResGridScale);
-
     static int GetGridDimension(Grid grid, int imageDimension, int neuralLod, int highResScale);
 
     static void GetPositionLodAndScale(int neuralLod, int mipLevel, float& outPositionLod, float& outPositionScale);

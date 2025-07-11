@@ -85,6 +85,7 @@ enum class ActivationType
 enum class MlpDataType
 {
     Int8,
+    Int32,
     FloatE4M3,
     FloatE5M2,
     Float16,
@@ -99,7 +100,9 @@ struct MLPLayer
     std::optional<uint32_t> scaleView;
     uint32_t biasView = 0;
     std::optional<MlpDataType> weightType;
-    std::optional<MlpDataType> scaleBiasType;
+    std::optional<MlpDataType> scaleBiasType; // Deprecated, use scaleType and biasType
+    std::optional<MlpDataType> scaleType;
+    std::optional<MlpDataType> biasType;
 
     MLPLayer() = default;
     MLPLayer(IAllocator* allocator) { }
@@ -110,8 +113,8 @@ struct MLP
     Vector<MLPLayer> layers;
     std::optional<ActivationType> activation;
     std::optional<MatrixLayout> weightLayout;
-    MlpDataType weightType;
-    MlpDataType scaleBiasType;
+    std::optional<MlpDataType> weightType;    // Deprecated, use MLPLayer::weightType
+    std::optional<MlpDataType> scaleBiasType; // Deprecated, use MLPLayer::scaleType and MLPLayer::biasType
 
     MLP(IAllocator* allocator)
         : layers(allocator)
@@ -137,8 +140,6 @@ struct Texture
 
 struct Channel
 {
-    float scale = 1.f;
-    float bias = 0.f;
     std::optional<ColorSpace> colorSpace;
 
     Channel(IAllocator* allocator)

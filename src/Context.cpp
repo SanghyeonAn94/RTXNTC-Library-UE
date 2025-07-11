@@ -18,6 +18,7 @@
 #include "GraphicsResources.h"
 #include "JsonFileFormat.h"
 #include "MathUtils.h"
+#include "MlpDesc.h"
 #include "Shaders.h"
 #include "Stream.h"
 #include "TextureMetadata.h"
@@ -48,6 +49,28 @@ Context::Context(ContextParameters const& params)
     if (params.graphicsApi != GraphicsAPI::None)
     {
         m_graphicsResources = new (m_allocator->Allocate(sizeof(GraphicsResources))) GraphicsResources(params);
+    }
+
+    // Fill the layout cache
+    for (int networkVersion = NTC_NETWORK_SMALL; networkVersion <= NTC_NETWORK_XLARGE; ++networkVersion)
+    {
+        for (InferenceWeightType weightType : {
+            InferenceWeightType::GenericInt8, InferenceWeightType::GenericFP8,
+            InferenceWeightType::CoopVecInt8, InferenceWeightType::CoopVecFP8 })
+        {
+            if (CoopVecWeightConverter::IsCoopVecWeightType(weightType))
+            {
+                if (!CoopVecWeightConverter::IsConversionSupported(m_graphicsResources, weightType))
+                    continue;
+            }
+
+            WeightLayout layout;
+            if (CoopVecWeightConverter::GetWeightLayout(m_graphicsResources,
+                *MlpDesc::FromNetworkVersion(networkVersion), weightType, layout))
+            {
+                m_weightLayouts[GetWeightLayoutArrayIndex(networkVersion, weightType)] = layout;
+            }
+        }
     }
 }
 
@@ -245,14 +268,14 @@ Status Context::CreateTextureSetMetadataFromStream(IStream* inputStream, ITextur
         return status;
 
     TextureSetMetadata* textureSetMetadata = new(m_allocator->Allocate(sizeof(TextureSetMetadata)))
-        TextureSetMetadata(m_allocator, desc, latentShape);
+        TextureSetMetadata(m_allocator, this, desc, latentShape);
 
     status = textureSetMetadata->LoadMetadataFromStream(document, binaryChunkOffset, binaryChunkSize,
         latentShape, inputStream);
 
     if (status == Status::Ok)
     {
-        status = textureSetMetadata->LoadWeightsFromStream(document, inputStream, m_graphicsResources);
+        status = textureSetMetadata->LoadWeightsFromStream(document, inputStream);
     }
 
     if (status != Status::Ok)
@@ -520,42 +543,32 @@ Status Context::MakeDecompressionComputePass(MakeDecompressionComputePassParamet
     // otherwise there's not enough shared memory allocated to store all the latents.
     bool const preloadLatents = latentImage->highResWidth <= mipWidth && latentImage->highResHeight <= mipHeight;
 
-    // Use the weight vectors from the texture set as support flags - if coopvec int8 or fp8 is not supported
-    // or disabled, the vector is empty. If there are no fp8 weights provided for example, the vector is also empty.
-    bool const legacyInt8 = !textureSetMetadata->GetInferenceWeightVector(InferenceWeightType::GenericInt8)->empty();
-    bool const coopVecInt8 = !textureSetMetadata->GetInferenceWeightVector(InferenceWeightType::CoopVecInt8)->empty();
-    bool const coopVecFP8 = params.enableFP8 && !textureSetMetadata->GetInferenceWeightVector(InferenceWeightType::CoopVecFP8)->empty();
-    bool const useCoopVec = coopVecInt8 || coopVecFP8;
-
     // Select the shader version based on which math modes are supported and enabled.
-    InferenceMath mathVersion;
-    InferenceWeightType weightType;
-    if (coopVecFP8)
+    InferenceMath mathVersion = InferenceMath::Legacy;
+    switch(params.weightType)
     {
-        mathVersion = InferenceMath::CoopVecFP8;
-        weightType = InferenceWeightType::CoopVecFP8;
-    }
-    else if (coopVecInt8)
-    {
-        mathVersion = InferenceMath::CoopVecInt8;
-        weightType = InferenceWeightType::CoopVecInt8;
-    }
-    else if (legacyInt8)
-    {
-        if (m_graphicsResources->IsDP4aSupported() && m_graphicsResources->IsFloat16Supported())
-            mathVersion = InferenceMath::DP4aWithFloat16;
-        else if (m_graphicsResources->IsDP4aSupported())
-            mathVersion = InferenceMath::DP4aNoFloat16;
-        else
-            mathVersion = InferenceMath::Legacy;
-        weightType = InferenceWeightType::GenericInt8;
-    }
-    else
-    {
-        SetErrorMessage("No weights for the supported inference modes found in the texture set");
-        return Status::Unsupported;
-    }
+        case InferenceWeightType::GenericInt8:
+            if (m_graphicsResources->IsDP4aSupported() && m_graphicsResources->IsFloat16Supported())
+                mathVersion = InferenceMath::DP4aWithFloat16;
+            else if (m_graphicsResources->IsDP4aSupported())
+                mathVersion = InferenceMath::DP4aNoFloat16;
+            else
+                mathVersion = InferenceMath::Legacy;
+            break;
+            
+        case InferenceWeightType::CoopVecInt8:
+            mathVersion = InferenceMath::CoopVecInt8;
+            break;
 
+        case InferenceWeightType::CoopVecFP8:
+            mathVersion = InferenceMath::CoopVecFP8;
+            break;
+
+        default:
+            SetErrorMessage("Unsupported weightType (%s)", InferenceWeightTypeToString(params.weightType));
+            return Status::InvalidArgument;
+    }
+    
     pOutComputePass->computeShader = nullptr;
     pOutComputePass->computeShaderSize = 0;
     
@@ -639,14 +652,13 @@ Status Context::MakeDecompressionComputePass(MakeDecompressionComputePassParamet
     pOutComputePass->constantBufferSize = sizeof(NtcDecompressConstants);
 
     // Fill the constant buffer using that latent buffer offset
-    textureSetMetadata->FillDecompressionConstants(constants, weightType, params.mipLevel, srcRect, dstOffset,
-        params.pOutputTextures, params.numOutputTextures, params.firstOutputDescriptorIndex, latentStreamRange.offset);
+    textureSetMetadata->FillDecompressionConstants(constants, params.weightType, params.weightOffset, params.mipLevel,
+        srcRect, dstOffset, params.pOutputTextures, params.numOutputTextures, params.firstOutputDescriptorIndex,
+        latentStreamRange.offset);
 
     int const gridWidth = constants.srcRight - constants.gridLeft;
     int const gridHeight = constants.srcBottom - constants.gridTop;
 
-    pOutComputePass->weightBufferData = textureSetMetadata->GetInferenceWeightVector(weightType)->data();
-    pOutComputePass->weightBufferSize = textureSetMetadata->GetInferenceWeightVector(weightType)->size();
     pOutComputePass->dispatchWidth = (gridWidth + DECOMPRESS_CS_BLOCK_WIDTH - 1) / DECOMPRESS_CS_BLOCK_WIDTH;
     pOutComputePass->dispatchHeight = (gridHeight + DECOMPRESS_CS_BLOCK_HEIGHT - 1) / DECOMPRESS_CS_BLOCK_HEIGHT;
 
@@ -861,6 +873,7 @@ Status Context::MakeInferenceData(ITextureSetMetadata* _textureSetMetadata, Stre
             break;
         default:
             SetErrorMessage("Unsupported weightType (%s)", InferenceWeightTypeToString(weightType));
+            return Status::Unsupported;
     }
 
     if (!textureSetMetadata->IsInferenceWeightTypeSupported(weightType))
@@ -1317,6 +1330,30 @@ bool Context::IsCooperativeVectorFP8Supported() const
         return m_graphicsResources->IsCoopVecFP8Supported();
 
     return false;
+}
+
+WeightLayout const* Context::GetWeightLayout(int networkVersion, InferenceWeightType weightType) const
+{
+    int const index = GetWeightLayoutArrayIndex(networkVersion, weightType);
+    if (index < 0)
+        return nullptr;
+
+    if (m_weightLayouts[index].has_value())
+        return &*m_weightLayouts[index];
+
+    return nullptr;
+}
+
+int Context::GetWeightLayoutArrayIndex(int networkVersion, InferenceWeightType weightType)
+{
+    if (networkVersion < NTC_NETWORK_SMALL || networkVersion > NTC_NETWORK_XLARGE)
+        return -1;
+
+    if (weightType < InferenceWeightType::GenericInt8 || weightType > InferenceWeightType::CoopVecFP8)
+        return -1;
+
+    return (networkVersion - NTC_NETWORK_SMALL) * (int(InferenceWeightType::Count) - 1)
+        + int(weightType) - int(InferenceWeightType::GenericInt8);
 }
 
 }

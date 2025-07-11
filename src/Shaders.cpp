@@ -16,10 +16,8 @@
 
 #if NTC_WITH_DX12
 #include <DecompressINT8.dxil.h>
-#if NTC_WITH_DX12_COOPVEC
 #include <DecompressCoopVecInt8.dxil.h>
 #include <DecompressCoopVecFP8.dxil.h>
-#endif
 #include <CompressBC1.dxil.h>
 #include <CompressBC2.dxil.h>
 #include <CompressBC3.dxil.h>
@@ -79,15 +77,11 @@ void GetBC7ShaderBytecode(const uint8_t* blobData, size_t blobSize, bool writeAc
 #if NTC_WITH_DX12
 void GetDecompressDxilShaderBytecode(MlpDesc const* mlpDesc, InferenceMath mathVersion, bool preloadLatents, const void** pOutData, size_t* pOutSize)
 {
-#if NTC_WITH_DX12_COOPVEC
     if (mathVersion == InferenceMath::CoopVecInt8)
         GetDecompressShaderBytecode(g_DecompressCoopVecInt8_dxil, sizeof(g_DecompressCoopVecInt8_dxil), mlpDesc, mathVersion, preloadLatents, pOutData, pOutSize);
     else if (mathVersion == InferenceMath::CoopVecFP8)
         GetDecompressShaderBytecode(g_DecompressCoopVecFP8_dxil, sizeof(g_DecompressCoopVecFP8_dxil), mlpDesc, mathVersion, preloadLatents, pOutData, pOutSize);
     else
-#else
-    if (mathVersion != InferenceMath::CoopVecInt8 && mathVersion != InferenceMath::CoopVecFP8)
-#endif
         GetDecompressShaderBytecode(g_DecompressINT8_dxil, sizeof(g_DecompressINT8_dxil), mlpDesc, mathVersion, preloadLatents, pOutData, pOutSize);
 }
 

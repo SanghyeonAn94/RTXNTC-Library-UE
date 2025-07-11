@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2023-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 #
 # NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
@@ -42,34 +42,6 @@ if (NTC_WITH_CUDA)
     if (NTC_CUDA_LINEINFO)
         list(APPEND CUDA_NVCC_FLAGS "--generate-line-info")
     endif()
-endif()
-
-
-if (WIN32)
-    set(NTC_DXC_PATH    "${CMAKE_CURRENT_SOURCE_DIR}/../external/dxc/windows-x64/bin/dxc.exe" 
-        CACHE FILEPATH  "Path to the DXC compiler for LibNTC")
-
-    set(NTC_SLANGC_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../external/slang/windows-x64/release/slangc.exe"
-        CACHE FILEPATH  "Path to the Slang compiler for LibNTC")
-
-    get_filename_component(slangc_directory ${NTC_SLANGC_PATH} DIRECTORY)
-    set(coopvec_dxcompiler_dll "${slangc_directory}/dxcompiler.dll")
-    set(coopvec_dxc_path "${slangc_directory}/dxc.exe")
-else()
-    set(NTC_DXC_PATH    "${CMAKE_CURRENT_SOURCE_DIR}/../external/dxc/linux-x64/bin/dxc"
-        CACHE FILEPATH  "Path to the DXC compiler for LibNTC")
-
-    set(NTC_SLANGC_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../external/slang/linux-x64/bin/slangc"
-        CACHE FILEPATH  "Path to the Slang compiler for LibNTC")
-endif()
-
-# Determine if we can compile CoopVec things, provide an explanation message if not.
-
-set(NTC_WITH_DX12_COOPVEC ${NTC_WITH_DX12})
-
-if (NTC_WITH_DX12_COOPVEC AND NOT EXISTS "${coopvec_dxcompiler_dll}")
-    message("LibNTC: CoopVec capable dxcompiler.dll not found at ${coopvec_dxc_path} - disabling DX12 CoopVec support.")
-    set(NTC_WITH_DX12_COOPVEC OFF)
 endif()
 
 if (NTC_BUILD_SHARED)
@@ -140,8 +112,7 @@ target_compile_definitions(libntc PRIVATE
     NTC_WITH_DX12=$<BOOL:${NTC_WITH_DX12}>
     NTC_WITH_VULKAN=$<BOOL:${NTC_WITH_VULKAN}>
     NTC_WITH_CUDA=$<BOOL:${NTC_WITH_CUDA}>
-    NTC_WITH_PREBUILT_SHADERS=$<BOOL:${NTC_WITH_PREBUILT_SHADERS}>
-    NTC_WITH_DX12_COOPVEC=$<BOOL:${NTC_WITH_DX12_COOPVEC}>)
+    NTC_WITH_PREBUILT_SHADERS=$<BOOL:${NTC_WITH_PREBUILT_SHADERS}>)
 
 if (WIN32)
     target_sources(libntc PRIVATE Resources.rc)
@@ -243,8 +214,8 @@ if (NTC_WITH_VULKAN)
     endif()
 endif()
 
-if (NTC_WITH_DX12_COOPVEC)
-    target_link_libraries(libntc PRIVATE nvapi)
+if (NTC_WITH_DX12)
+    target_link_libraries(libntc PRIVATE DirectX-Headers dxgi)
 endif()
 
 if (NTC_WITH_PREBUILT_SHADERS AND (NTC_WITH_DX12 OR NTC_WITH_VULKAN))
@@ -303,6 +274,7 @@ if (NTC_WITH_PREBUILT_SHADERS AND (NTC_WITH_DX12 OR NTC_WITH_VULKAN))
         ${shader_output_dir}/CompressBC7.dxil.h
         ${shader_output_dir}/DecompressINT8.dxil.h
         ${shader_output_dir}/ImageDifference.dxil.h
+        ${shader_output_dir}/InferenceCoopVecCompileTest.dxil.h
     )
 
     set(shader_byproducts_spirv
@@ -332,64 +304,50 @@ if (NTC_WITH_PREBUILT_SHADERS AND (NTC_WITH_DX12 OR NTC_WITH_VULKAN))
             --config ${shader_config_file}
             --out ${shader_output_dir}
             --platform DXIL
+            --project LibNTC
             --headerBlob
-            --compiler ${NTC_DXC_PATH}
+            --compiler ${SHADERMAKE_DXC_PATH}
             --shaderModel 6_5
             --hlsl2021
-            -I ${include_directory}
-            --useAPI)
+            -I ${include_directory})
 
-        if (NTC_WITH_DX12_COOPVEC)
-            add_custom_command(TARGET libntc-shaders PRE_BUILD BYPRODUCTS ${shader_byproducts_slang_dxil} COMMAND ShaderMake
-                --config ${shader_config_file_slang}
-                --out ${shader_output_dir}
-                --platform DXIL
-                --headerBlob
-                --compiler ${NTC_SLANGC_PATH}
-                --shaderModel 6_8
-                --slang
-                --noRegShifts
-                -X -Wno-41016
-                -X -Wno-41017
-                -I ${include_directory})
-
-            if (EXISTS ${coopvec_dxc_path})
-                add_custom_command(TARGET libntc-shaders PRE_BUILD COMMAND ShaderMake
-                    --config ${shader_config_file_test}
-                    --out ${shader_output_dir}
-                    --platform DXIL
-                    --binaryBlob # don't care
-                    --compiler ${coopvec_dxc_path}
-                    --shaderModel 6_8
-                    --hlsl2021
-                    -X -Vd # disable validation because there's no right dxil.dll
-                    -I ${include_directory}
-                    --useAPI)
-            else()
-                message("Warning: CoopVec capable DXC not found at ${coopvec_dxc_path}, disabling test shader building.")
-            endif()
-        endif()
+        add_custom_command(TARGET libntc-shaders PRE_BUILD BYPRODUCTS ${shader_byproducts_slang_dxil} COMMAND ShaderMake
+            --config ${shader_config_file_slang}
+            --out ${shader_output_dir}
+            --platform DXIL
+            --project LibNTC
+            --headerBlob
+            --compiler ${SHADERMAKE_SLANG_PATH}
+            --shaderModel 6_9
+            --slang
+            --noRegShifts
+            -X -Wno-41012
+            -X -Wno-41016
+            -X -Wno-41017
+            -X "-Xdxc -Vd" # disable validation, it's not ready
+            -I ${include_directory})
     endif()
 
     if (NTC_WITH_VULKAN)
         add_custom_command(TARGET libntc-shaders PRE_BUILD BYPRODUCTS ${shader_byproducts_spirv} COMMAND ShaderMake
             --config ${shader_config_file}
             --out ${shader_output_dir}
+            --project LibNTC
             --platform SPIRV
             --headerBlob
-            --compiler ${NTC_DXC_PATH}
+            --compiler ${SHADERMAKE_DXC_PATH}
             --vulkanVersion 1.2
             --hlsl2021
             -I ${include_directory}
-            -D SPIRV
-            $<$<BOOL:${WIN32}>:--useAPI>)
+            -D SPIRV)
 
         add_custom_command(TARGET libntc-shaders PRE_BUILD BYPRODUCTS ${shader_byproducts_slang_spirv} COMMAND ShaderMake
             --config ${shader_config_file_slang}
             --out ${shader_output_dir}
+            --project LibNTC
             --platform SPIRV
             --headerBlob
-            --compiler ${NTC_SLANGC_PATH}
+            --compiler ${SHADERMAKE_SLANG_PATH}
             --slang
             --noRegShifts
             -X -Wno-41017

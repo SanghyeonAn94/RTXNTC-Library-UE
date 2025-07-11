@@ -19,6 +19,7 @@
 #include "MathUtils.h"
 #include "MlpDesc.h"
 #include "TextureMetadata.h"
+#include "Context.h"
 #include <cassert>
 #include <cinttypes>
 #include <cstring>
@@ -27,14 +28,16 @@
 
 namespace ntc
 {
-TextureSetMetadata::TextureSetMetadata(IAllocator* allocator, 
+
+constexpr float c_ConstantBiasScale = 65536.f;
+
+TextureSetMetadata::TextureSetMetadata(IAllocator* allocator, Context const* context,
     TextureSetDesc const& desc, LatentShape const& latentShape)
     : m_allocator(allocator)
+    , m_context(context)
     , m_desc(desc)
     , m_latentShape(latentShape)
     , m_textureInfos(allocator)
-    , m_coopVecWeightDataInt8(allocator)
-    , m_coopVecWeightDataFP8(allocator)
     , m_rowMajorWeightDataInt8(allocator)
     , m_rowMajorWeightDataFP8(allocator)
     , m_latentImages(allocator)
@@ -42,6 +45,15 @@ TextureSetMetadata::TextureSetMetadata(IAllocator* allocator,
     if (!m_latentShape.IsEmpty())
     {
         m_mlpDesc = MlpDesc::PickOptimalConfig(m_latentShape.highResFeatures, m_latentShape.lowResFeatures);
+    }
+
+    m_channelColorSpaces.fill(ntc::ColorSpace::Linear);
+
+    // Initialize the shuffle pattern with an identity map (i -> i)
+    for (int ch = 0; ch < NTC_MAX_CHANNELS; ++ch)
+    {
+        m_channelShuffleMapping[ch].type = ShuffleSourceType::Channel;
+        m_channelShuffleMapping[ch].channelIndex = ch;
     }
 }
 
@@ -236,31 +248,209 @@ Status TextureSetMetadata::GetMipLevelsForLatentImage(int latentImageIndex, int*
     return Status::Ok;
 }
 
-Status TextureSetMetadata::GetInferenceWeights(InferenceWeightType weightType,
-    void const** pOutData, size_t* pOutSize) const
+InferenceWeightType TextureSetMetadata::GetBestSupportedWeightType() const
 {
-    Vector<uint8_t> const* vec = GetInferenceWeightVector(weightType);
+    for (auto type : { InferenceWeightType::CoopVecFP8,
+                       InferenceWeightType::CoopVecInt8,
+                       InferenceWeightType::GenericInt8 })
+    {
+        if (IsInferenceWeightTypeSupported(type))
+            return type;
+    }
 
-    if (!vec || vec->empty())
+    return InferenceWeightType::Unknown;
+}
+
+Status TextureSetMetadata::GetInferenceWeights(InferenceWeightType weightType,
+    void const** pOutData, size_t* pOutSize, size_t* pOutConvertedSize)
+{
+    WeightLayout const* layout = m_context->GetWeightLayout(m_mlpDesc->networkVersion, weightType);
+
+    if (!IsInferenceWeightTypeSupported(weightType) || layout == nullptr)
     {
         SetErrorMessage("No weights available for weightType = %s.",
             InferenceWeightTypeToString(weightType));
         return Status::Unsupported;
     }
 
-    if (pOutData)
-        *pOutData = vec->data();
-    if (pOutSize)
-        *pOutSize = vec->size();
+    void const* pData = nullptr;
+    size_t size = 0;
+    size_t convertedSize = 0;
+    
+    switch(weightType)
+    {
+        case InferenceWeightType::GenericInt8:
+            size = m_rowMajorWeightDataInt8.size();
+            pData = m_rowMajorWeightDataInt8.data();
+            break;
+        case InferenceWeightType::GenericFP8:
+            size = m_rowMajorWeightDataFP8.size();
+            pData = m_rowMajorWeightDataFP8.data();
+            break;
+        case InferenceWeightType::CoopVecInt8:
+            size = m_rowMajorWeightDataInt8.size();
+            pData = m_rowMajorWeightDataInt8.data();
+            convertedSize = layout->bufferSize;
+            break;
+        case InferenceWeightType::CoopVecFP8:
+            size = m_rowMajorWeightDataFP8.size();
+            pData = m_rowMajorWeightDataFP8.data();
+            convertedSize = layout->bufferSize;
+            break;
+        default:
+            assert(!"Unsupported value - should be verified by IsInferenceWeightTypeSupported above");
+            break;
+    }
+
+    if (pOutData) *pOutData = pData;
+    if (pOutSize) *pOutSize = size;
+    if (pOutConvertedSize) *pOutConvertedSize = convertedSize;
 
     return Status::Ok;
 }
 
 bool TextureSetMetadata::IsInferenceWeightTypeSupported(InferenceWeightType weightType) const
 {
-    Vector<uint8_t> const* vec = GetInferenceWeightVector(weightType);
+    if (CoopVecWeightConverter::IsCoopVecWeightType(weightType))
+    {
+        // For CoopVec types, check if the source generic data is available and if the conversion is supported
+        InferenceWeightType const genericType = CoopVecWeightConverter::GetGenericWeightType(weightType);
 
-    return vec && !vec->empty();
+        return IsInferenceWeightTypeSupported(genericType)
+            && CoopVecWeightConverter::IsConversionSupported(m_context->GetGraphicsResources(), weightType);
+    }
+
+    switch(weightType)
+    {
+    case InferenceWeightType::GenericInt8:
+        return !m_rowMajorWeightDataInt8.empty();
+    case InferenceWeightType::GenericFP8:
+        return !m_rowMajorWeightDataFP8.empty();
+    default:
+        return false;
+    }
+}
+
+Status TextureSetMetadata::ShuffleInferenceOutputs(ShuffleSource mapping[NTC_MAX_CHANNELS])
+{
+    if (mapping == nullptr)
+    {
+        SetErrorMessage("mapping is NULL");
+        return Status::InvalidArgument;
+    }
+
+    // Validate the mapping
+    for (int ch = 0; ch < NTC_MAX_CHANNELS; ++ch)
+    {
+        switch(mapping[ch].type)
+        {
+            case ShuffleSourceType::Undefined:
+            case ShuffleSourceType::Channel:
+            case ShuffleSourceType::Constant:
+                break;
+            default:
+                SetErrorMessage("mapping[%d] has invalid type %d", ch, int(mapping[ch].type));
+                return Status::InvalidArgument;
+        }
+
+        if (mapping[ch].type == ShuffleSourceType::Channel &&
+            (mapping[ch].channelIndex < 0 || mapping[ch].channelIndex >= NTC_MAX_CHANNELS))
+        {
+            SetErrorMessage("mapping[%d] is using invalid channel %d, must be between 0 and %d",
+                ch, mapping[ch].channelIndex, NTC_MAX_CHANNELS - 1);
+            return Status::OutOfRange;
+        }
+    }
+
+    auto shuffleWeights = [this, mapping](Vector<uint8_t>& data, InferenceWeightType weightType)
+    {
+        if (data.empty())
+            return;
+
+        WeightLayout const* layout = m_context->GetWeightLayout(m_mlpDesc->networkVersion, weightType);
+        assert(layout);
+
+        Span const& outputLayerWeights = layout->weights[NTC_MLP_LAYERS - 1];
+        Span const& outputLayerScales = layout->scales[NTC_MLP_LAYERS - 1];
+        Span const& outputLayerBiases = layout->biases[NTC_MLP_LAYERS - 1];
+
+        int const inputChannels = m_mlpDesc->GetLayerInputChannels(NTC_MLP_LAYERS - 1);
+        int const outputChannels = m_mlpDesc->GetLayerOutputChannels(NTC_MLP_LAYERS - 1);
+
+        // Sanity check
+        assert(inputChannels == NTC_MLP_HIDDEN_CHANNELS);
+        assert(outputChannels == NTC_MLP_OUTPUT_CHANNELS);
+        static_assert(NTC_MAX_CHANNELS == NTC_MLP_OUTPUT_CHANNELS,
+            "This function assumes that NTC_MAX_CHANNELS == NTC_MLP_OUTPUT_CHANNELS");
+
+        // Output layer for Int8 and FP8 modes has 8-bit weights, Float32 scale and Int32 bias
+        assert(outputLayerWeights.type == DataType::FP8 || outputLayerWeights.type == DataType::Int8);
+        assert(outputLayerScales.type == DataType::FP32);
+        assert(outputLayerBiases.type == DataType::Int32);
+
+        uint8_t* weights = data.data() + outputLayerWeights.offset;
+        float* scale = (float*)(data.data() + outputLayerScales.offset);
+        int32_t* bias = (int32_t*)(data.data() + outputLayerBiases.offset);
+        std::array<uint8_t, NTC_MLP_HIDDEN_CHANNELS * NTC_MLP_OUTPUT_CHANNELS> tmpWeights;
+        std::array<float, NTC_MLP_OUTPUT_CHANNELS> tmpScale;
+        std::array<int32_t, NTC_MLP_OUTPUT_CHANNELS> tmpBias;
+
+        // Shuffle the row data into 'tmpWeights', scale and bias into 'tmpScale' and 'tmpBias'
+        for (int dstRow = 0; dstRow < outputChannels; ++dstRow)
+        {
+            ShuffleSource& src = mapping[dstRow];
+            uint8_t* pDstRow = tmpWeights.data() + inputChannels * dstRow;
+            if (src.type == ShuffleSourceType::Channel)
+            {
+                uint8_t const* pSrcRow = weights + inputChannels * src.channelIndex;
+                memcpy(pDstRow, pSrcRow, inputChannels);
+                tmpScale[dstRow] = scale[src.channelIndex];
+                tmpBias[dstRow] = bias[src.channelIndex];
+            }
+            else
+            {
+                // The row will produce zero as the output of the matrix-vector multiplication, plus (bias * scale).
+                // Set the scale and bias to produce the constant value.
+                memset(pDstRow, 0, inputChannels);
+                tmpScale[dstRow] = 1.f / c_ConstantBiasScale;
+                tmpBias[dstRow] = (src.type == ShuffleSourceType::Constant) ? int(roundf(src.constantValue * c_ConstantBiasScale)) : 0;
+            }
+        }
+
+        // Copy the shuffled data back into the MLP vector
+        memcpy(weights, tmpWeights.data(), outputLayerWeights.size);
+        memcpy(scale, tmpScale.data(), outputLayerScales.size);
+        memcpy(bias, tmpBias.data(), outputLayerBiases.size);
+    };
+
+    shuffleWeights(m_rowMajorWeightDataInt8, InferenceWeightType::GenericInt8);
+    shuffleWeights(m_rowMajorWeightDataFP8, InferenceWeightType::GenericFP8);
+
+    std::array<ColorSpace, NTC_MAX_CHANNELS> newColorSpaces;
+    std::array<ShuffleSource, NTC_MAX_CHANNELS> newMapping;
+
+    for (int ch = 0; ch < NTC_MAX_CHANNELS; ++ch)
+    {
+        switch(mapping[ch].type)
+        {
+            case ShuffleSourceType::Undefined:
+            case ShuffleSourceType::Constant:
+                newColorSpaces[ch] = ColorSpace::Linear;
+                newMapping[ch] = mapping[ch];
+                break;
+            case ShuffleSourceType::Channel: {
+                int const srcChannel = mapping[ch].channelIndex;
+                newColorSpaces[ch] = m_channelColorSpaces[srcChannel];
+                newMapping[ch] = m_channelShuffleMapping[srcChannel];
+                break;
+            }
+        }
+    }
+
+    m_channelColorSpaces = newColorSpaces;
+    m_channelShuffleMapping = newMapping;
+
+    return Status::Ok;
 }
 
 Status TextureSetMetadata::LoadMetadataFromStream(json::Document const& document, uint64_t binaryChunkOffset,
@@ -336,15 +526,6 @@ Status TextureSetMetadata::LoadMetadataFromStream(json::Document const& document
         for (size_t i = 0; i < document.channels.size(); ++i)
         {
             json::Channel const& jsonChannel = document.channels[i];
-            ChannelInfo& info = m_channelInfos[i];
-            info.optimalToLinearScale = jsonChannel.scale;
-            info.optimalToLinearBias = jsonChannel.bias;
-            // Inverse of the linear mapping:
-            // linear = scale * optimal + bias
-            // optimal = linear / scale - bias / scale
-            info.linearToOptimalScale = 1.f / info.optimalToLinearScale;
-            info.linearToOptimalBias = -info.optimalToLinearBias * info.linearToOptimalScale;
-
             m_channelColorSpaces[i] = jsonChannel.colorSpace.value_or(ColorSpace::Linear);
         }
     }
@@ -471,213 +652,209 @@ int TextureSetMetadata::ColorMipToNeuralLod(int colorMip) const
     return m_colorMips[colorMip].neuralLod;
 }
 
-Status TextureSetMetadata::LoadWeightsFromStream(json::Document const& document, IStream* inputStream,
-    GraphicsResources const* graphicsResources)
-{   
-    m_rowMajorWeightSize = m_mlpDesc->GetWeightCount();
-
-    auto readMlpData = [this, &inputStream, &document]
-    (json::MLP const& mlp, Vector<uint8_t>& dst, bool useFP8)
+Status TextureSetMetadata::ConvertInferenceWeights(InferenceWeightType weightType, void* commandList,
+    void* srcBuffer, uint64_t srcOffset, void* dstBuffer, uint64_t dstOffset)
+{
+    if (!commandList)
     {
-        size_t dataSize = m_rowMajorWeightSize + m_mlpDesc->GetLayerOutputCount() * sizeof(float) * 2;
-        dst.resize(dataSize);
+        SetErrorMessage("commandList is NULL");
+        return Status::InvalidArgument;
+    }
+
+    if (!srcBuffer)
+    {
+        SetErrorMessage("srcBuffer is NULL");
+        return Status::InvalidArgument;
+    }
+    
+    if (!dstBuffer)
+    {
+        SetErrorMessage("dstBuffer is NULL");
+        return Status::InvalidArgument;
+    }
+
+    if (dstBuffer == srcBuffer)
+    {
+        SetErrorMessage("dstBuffer must not be the same as srcBuffer");
+        return Status::InvalidArgument;
+    }
+
+    if (!CoopVecWeightConverter::IsCoopVecWeightType(weightType))
+    {
+        SetErrorMessage("Unsupported weightType (%s), must be one of the CoopVec types",
+            InferenceWeightTypeToString(weightType));
+        return Status::InvalidArgument;
+    }
+    
+    WeightLayout const* srcLayout = m_context->GetWeightLayout(m_mlpDesc->networkVersion,
+        CoopVecWeightConverter::GetGenericWeightType(weightType));
+
+    assert(srcLayout); // Row-major layouts are always available
+
+    WeightLayout const* dstLayout = m_context->GetWeightLayout(m_mlpDesc->networkVersion, weightType);
+
+    if (dstLayout == nullptr)
+    {
+        SetErrorMessage("The requested conversion operation is not supported by the graphics device or "
+            "disabled by the context settings.");
+        return Status::Unsupported;
+    }
+
+    CoopVecWeightConverter::ConvertWeights(m_context->GetGraphicsResources(), *m_mlpDesc,
+        *srcLayout, srcBuffer, srcOffset,
+        *dstLayout, dstBuffer, dstOffset, commandList);
+
+    return Status::Ok;
+}
+
+// Get the MLP weight type from the legacy descriptor in the MLP or the new descriptor in its first layer
+static std::optional<json::MlpDataType> GetRepresentativeMlpWeightType(std::optional<json::MLP> const& mlp)
+{
+    if (!mlp.has_value())
+        return std::nullopt;
+
+    if (!mlp->layers.empty() && mlp->layers[0].weightType.has_value())
+        return mlp->layers[0].weightType;
+
+    return mlp->weightType;
+}
+
+Status TextureSetMetadata::LoadWeightsFromStream(json::Document const& document, IStream* inputStream)
+{
+    auto readMlpData = [this, &inputStream, &document]
+    (json::MLP const& mlp, Vector<uint8_t>& dst, InferenceWeightType weightType)
+    {
+        WeightLayout const* weightLayout = m_context->GetWeightLayout(m_mlpDesc->networkVersion, weightType);
+        dst.resize(weightLayout->bufferSize);
         
-        // See the comment block in the beginning of TextureSet.cpp for the weight layouts
-
-        size_t mlpWeightsOffset = 0;
-        size_t mlpScaleOffset = m_rowMajorWeightSize;
-        size_t mlpBiasOffset = useFP8
-            ? mlpScaleOffset
-            : mlpScaleOffset + m_mlpDesc->GetLayerOutputCount() * sizeof(float);
-
         for (int layerIndex = 0; layerIndex < NTC_MLP_LAYERS; ++layerIndex)
         {
             json::MLPLayer const& layer = mlp.layers[layerIndex];
 
+            Span const& layerWeights = weightLayout->weights[layerIndex];
+            Span const& layerScale = weightLayout->scales[layerIndex];
+            Span const& layerBias = weightLayout->biases[layerIndex];
+
             if (!ReadViewFromStream(inputStream, document, layer.weightView,
-                dst.data() + mlpWeightsOffset, layer.inputChannels * layer.outputChannels))
+                dst.data() + layerWeights.offset, layerWeights.size))
                 return Status::IOError;
-            mlpWeightsOffset += layer.inputChannels * layer.outputChannels;
 
-            bool const outputLayer = layerIndex == NTC_MLP_LAYERS - 1;
-            bool const needsScaleVector = !useFP8 || outputLayer;
-            size_t scaleBiasElemSize = (useFP8 && !outputLayer) ? sizeof(uint16_t) : sizeof(float);
-            size_t const scaleOrBiasSize = layer.outputChannels * scaleBiasElemSize;
-            if (useFP8 && outputLayer)
-            {
-                mlpScaleOffset = mlpBiasOffset;
-                mlpBiasOffset += scaleOrBiasSize;
-            }
-
-
-            if (needsScaleVector)
+            if (layerScale.size != 0)
             {
                 if (layer.scaleView.has_value())
                 {
                     if (!ReadViewFromStream(inputStream, document, *layer.scaleView,
-                        dst.data() + mlpScaleOffset, layer.outputChannels * scaleBiasElemSize))
+                        dst.data() + layerScale.offset, layerScale.size))
                         return Status::IOError;
                 }
                 else
                 {
-                    // No scale vectors provided - fill the memory with 1.0 (depending on type)
-                    if (scaleBiasElemSize == 2) // FP16
-                    {
-                        uint16_t* scales = (uint16_t*)(dst.data() + mlpScaleOffset);
-                        for (uint32_t i = 0; i < layer.outputChannels; ++i)
-                            scales[i] = 0x3c00; // float16(1.0)
-                    }
-                    else // FP32
-                    {
-                        float* scales = (float*)(dst.data() + mlpScaleOffset);
-                        for (uint32_t i = 0; i < layer.outputChannels; ++i)
-                            scales[i] = 1.0f;
-                    }
+                    // No scale vectors provided - fill the memory with 1.0
+                    assert(layerScale.type == DataType::FP32);
+
+                    float* scales = (float*)(dst.data() + layerScale.offset);
+                    for (uint32_t i = 0; i < layer.outputChannels; ++i)
+                        scales[i] = 1.0f;
                 }
-                mlpScaleOffset += layer.outputChannels * scaleBiasElemSize;
             }
 
             if (!ReadViewFromStream(inputStream, document, layer.biasView,
-                dst.data() + mlpBiasOffset, layer.outputChannels * scaleBiasElemSize))
+                dst.data() + layerBias.offset, layerBias.size))
                 return Status::IOError;
-            mlpBiasOffset += layer.outputChannels * scaleBiasElemSize;
+
+            // For INT8 layers in legacy files, convert the float scale and bias from the (float(output) * scale + bias) form
+            // to the (float(output + int(bias/scale)) * scale) form
+            std::optional<json::MlpDataType> storedBiasType;
+            if (layer.biasType.has_value())
+                storedBiasType = layer.biasType;
+            else if (layer.scaleBiasType.has_value())
+                storedBiasType = layer.scaleBiasType;
+            else
+                storedBiasType = mlp.scaleBiasType;
+
+            if (layerWeights.type == DataType::Int8 &&
+                layerBias.type == DataType::Int32 && storedBiasType == json::MlpDataType::Float32 &&
+                layerScale.type == DataType::FP32)
+            {
+                int const inputChannels = m_mlpDesc->GetLayerInputChannels(layerIndex);
+                for (uint32_t i = 0; i < layer.outputChannels; ++i)
+                {
+                    float* const pScale = (float*)(dst.data() + layerScale.offset) + i;
+                    
+                    // Use void* because we're converting from a float to an int
+                    void* pBias = dst.data() + layerBias.offset + i * sizeof(float);
+
+                    // Special case when scale is zero, which can happen on the output layer if an image channel is constant.
+                    // See also QuantizeColumnInt8(...) in Quantizer.cu which implements the same logic.
+                    if (*pScale == 0.f)
+                    {
+                        // Zero scale: use a predefined constant scale and express the constant bias using this scale.
+                        *pScale = 1.f / c_ConstantBiasScale;
+                        *(int*)pBias = int(roundf(*(float*)pBias * c_ConstantBiasScale));
+
+                        // Zero out the weights to produce the correct result.
+                        uint8_t* pWeightRow = dst.data() + layerWeights.offset + inputChannels * i;
+                        memset(pWeightRow, 0, inputChannels);
+                    }
+                    else
+                    {
+                        // Nonzero scale: simple conversion.
+                        *(int*)pBias = int(roundf(*(float*)pBias / *pScale));
+                    }
+                }
+            }
         }
 
         return Status::Ok;
     };
 
     Status status;
-    if (document.mlp.has_value() && document.mlp->weightType == json::MlpDataType::Int8)
+
+    std::optional<json::MlpDataType> const documentMlpWeightType = GetRepresentativeMlpWeightType(document.mlp);
+
+    if (documentMlpWeightType == json::MlpDataType::Int8)
     {
-        status = readMlpData(*document.mlp, m_rowMajorWeightDataInt8, false);
+        status = readMlpData(*document.mlp, m_rowMajorWeightDataInt8, InferenceWeightType::GenericInt8);
         if (status != Status::Ok)
             return status;
     }
-
-    if (document.mlp.has_value() && document.mlp->weightType == json::MlpDataType::FloatE4M3)
+    else if (documentMlpWeightType == json::MlpDataType::FloatE4M3)
     {
-        status = readMlpData(*document.mlp, m_rowMajorWeightDataFP8, true);
+        status = readMlpData(*document.mlp, m_rowMajorWeightDataFP8, InferenceWeightType::GenericFP8);
         if (status != Status::Ok)
             return status;
     }
 
     for (json::MLP const& mlp : document.mlpVersions)
     {
-        if (mlp.weightType == json::MlpDataType::Int8)
+        std::optional<json::MlpDataType> const mlpWeightType = GetRepresentativeMlpWeightType(mlp);
+
+        if (mlpWeightType == json::MlpDataType::Int8)
         {
-            status = readMlpData(mlp, m_rowMajorWeightDataInt8, false);
+            status = readMlpData(mlp, m_rowMajorWeightDataInt8, InferenceWeightType::GenericInt8);
             if (status != Status::Ok)
                 return status;
         }
-        else if (mlp.weightType == json::MlpDataType::FloatE4M3)
+        else if (mlpWeightType == json::MlpDataType::FloatE4M3)
         {
-            status = readMlpData(mlp, m_rowMajorWeightDataFP8, true);
+            status = readMlpData(mlp, m_rowMajorWeightDataFP8, InferenceWeightType::GenericFP8);
             if (status != Status::Ok)
                 return status;
         }
-    }
-
-    auto convertWeights = [this, graphicsResources](Vector<uint8_t> const& src, Vector<uint8_t>& dst,
-        bool useFP8, size_t& outWeightSize, int outWeightOffsets[4])
-    {
-        if (src.empty())
-            return;
-
-        // Compute the size of the translated weights and allocate weight buffer
-        CoopVecWeightConverter weightConverter(
-            graphicsResources,
-            useFP8,
-            m_mlpDesc->GetInputChannels(),
-            m_mlpDesc->GetHiddenChannels(),
-            m_mlpDesc->GetOutputChannels(),
-            m_mlpDesc->GetHiddenLayers());
-        
-        if (!weightConverter.IsConversionSupported())
-            return;
-
-        size_t sourceWeightSize = weightConverter.GetSourceWeightSize();
-        outWeightSize = weightConverter.GetConvertedWeightSize();
-
-        size_t scaleAndBiasSize;
-        if (useFP8)
-        {
-            scaleAndBiasSize = (m_mlpDesc->GetLayerOutputCount() - m_mlpDesc->GetOutputChannels()) * sizeof(uint16_t)
-                             + m_mlpDesc->GetOutputChannels() * sizeof(float) * 2;
-        }
-        else
-        {
-            scaleAndBiasSize = m_mlpDesc->GetLayerOutputCount() * sizeof(float) * 2;
-        }
-
-        dst.resize(outWeightSize + scaleAndBiasSize);
-
-        // Translate the network weights
-        weightConverter.ConvertWeights(src.data(), dst.data());
-        weightConverter.GetConvertedWeightOffsets(outWeightOffsets);
-
-        // Copy scale and bias next to the weights
-        memcpy(dst.data() + outWeightSize, src.data() + sourceWeightSize, scaleAndBiasSize);
-    };
-
-    if (graphicsResources)
-    {
-        convertWeights(m_rowMajorWeightDataInt8, m_coopVecWeightDataInt8, /* useFP8 = */ false,
-            m_coopVecWeightSizeInt8, m_coopVecWeightOffsetsInt8);
-
-        convertWeights(m_rowMajorWeightDataFP8, m_coopVecWeightDataFP8, /* useFP8 = */ true,
-            m_coopVecWeightSizeFP8, m_coopVecWeightOffsetsFP8);
     }
 
     return Status::Ok;
 }
 
-Vector<uint8_t> const* TextureSetMetadata::GetInferenceWeightVector(InferenceWeightType weightType) const
-{
-    switch(weightType)
-    {
-    case InferenceWeightType::GenericInt8:
-        return &m_rowMajorWeightDataInt8;
-    case InferenceWeightType::GenericFP8:
-        return &m_rowMajorWeightDataFP8;
-    case InferenceWeightType::CoopVecInt8:
-        return &m_coopVecWeightDataInt8;
-    case InferenceWeightType::CoopVecFP8:
-        return &m_coopVecWeightDataFP8;
-    default:
-        return nullptr;
-    }
-}
-
 void TextureSetMetadata::GetWeightOffsets(InferenceWeightType weightType,
     int weightOffsets[NTC_MLP_LAYERS], int& scaleBiasOffset)
 {
-    switch(weightType)
-    {
-    case InferenceWeightType::GenericInt8:
-    case InferenceWeightType::GenericFP8:
-        weightOffsets[0] = 0; // Offset within the weight buffer
-        weightOffsets[1] = weightOffsets[0] + m_mlpDesc->GetInputChannels() * NTC_MLP_HIDDEN_CHANNELS;
-        weightOffsets[2] = weightOffsets[1] + NTC_MLP_HIDDEN_CHANNELS * NTC_MLP_HIDDEN_CHANNELS;
-        weightOffsets[3] = weightOffsets[2] + NTC_MLP_HIDDEN_CHANNELS * NTC_MLP_HIDDEN_CHANNELS;
-        scaleBiasOffset = int(m_rowMajorWeightSize);
-        break;
-        
-    case InferenceWeightType::CoopVecInt8:
-        for (int i = 0; i < NTC_MLP_LAYERS; ++i)
-        {
-            weightOffsets[i] = m_coopVecWeightOffsetsInt8[i];
-        }
-        scaleBiasOffset = int(m_coopVecWeightSizeInt8);
-        break;
+    WeightLayout const* layout = m_context->GetWeightLayout(m_mlpDesc->networkVersion, weightType);
+    assert(layout); // Support should be validated by the caller
 
-    case InferenceWeightType::CoopVecFP8:
-        for (int i = 0; i < NTC_MLP_LAYERS; ++i)
-        {
-            weightOffsets[i] = m_coopVecWeightOffsetsFP8[i];
-        }
-        scaleBiasOffset = int(m_coopVecWeightSizeFP8);
-        break;
-    }
+    for (int layer = 0; layer < NTC_MLP_LAYERS; ++layer)
+        weightOffsets[layer] = int(layout->weights[layer].offset);
+    scaleBiasOffset = int(layout->combinedScaleBias.offset);
 }
 
 static uint32_t GetChannelMask(int firstChannel, int numChannels)
@@ -695,7 +872,21 @@ uint32_t TextureSetMetadata::GetValidChannelMask() const
 
         validMask |= GetChannelMask(firstChannel, numChannels);
     }
-    return validMask;
+    
+    // Textures are defined in un-shuffled space, but the channels might be shuffled,
+    // so shuffle the valid mask as well. Also consider constant outputs as valid.
+    uint32_t shuffledMask = 0;
+    for (int ch = 0; ch < NTC_MAX_CHANNELS; ++ch)
+    {
+        ShuffleSource const& src = m_channelShuffleMapping[ch];
+        if (src.type == ShuffleSourceType::Channel && (validMask & (1 << src.channelIndex)) != 0 ||
+            src.type == ShuffleSourceType::Constant)
+        {
+            shuffledMask |= (1 << ch);
+        }
+    }
+        
+    return shuffledMask;
 }
 
 uint32_t TextureSetMetadata::GetPackedColorSpaces() const
@@ -764,6 +955,7 @@ void TextureSetMetadata::FillColorMipConstants(
 void TextureSetMetadata::FillDecompressionConstants(
     NtcDecompressConstants& output,
     InferenceWeightType weightType,
+    int weightOffset,
     int mipLevel,
     Rect srcRect,
     Point dstOffset,
@@ -789,6 +981,9 @@ void TextureSetMetadata::FillDecompressionConstants(
     output.imageHeight = mipHeight;
     
     GetWeightOffsets(weightType, output.networkWeightOffsets, output.networkScaleBiasOffset);
+    for (int layer = 0; layer < NTC_MLP_LAYERS; ++layer)
+        output.networkWeightOffsets[layer] += weightOffset;
+    output.networkScaleBiasOffset += weightOffset;
 
     // If there are no user-specified outputs, fill out the output descriptors from metadata
     OutputTextureDesc defaultOutputs[DECOMPRESS_CS_MAX_OUTPUTS] {};
@@ -923,32 +1118,79 @@ bool TextureSetMetadata::ValidateMLP(json::Document const& document, json::MLP c
     }
 
     // We support two MLP configurations:
-    // 1. All layers have Int8 weights and Float32 scale/bias
-    // 2. Layers 0-2 have FP8 weights and Float16 bias, layer 3 has Int8 weights and Float32 scale/bias
+    // 1. All layers have Int8 weights, Float32 scale, Int32 or Float32 (legacy) bias
+    // 2. Layers 0-2 have FP8 weights and Float16 bias;
+    //    Layer 3 has Int8 weights, Float32 scale, Int32 or Float32 (legacy) bias
     // Validate that the provided config matches one of these.
     static std::array<json::MlpDataType, NTC_MLP_LAYERS> const c_Int8WeightTypes = {
         json::MlpDataType::Int8, json::MlpDataType::Int8, json::MlpDataType::Int8, json::MlpDataType::Int8 };
-    static std::array<json::MlpDataType, NTC_MLP_LAYERS> const c_Int8ScaleBiasTypes = {
+    static std::array<std::optional<json::MlpDataType>, NTC_MLP_LAYERS> const c_Int8ScaleTypes = {
+        json::MlpDataType::Float32, json::MlpDataType::Float32, json::MlpDataType::Float32, json::MlpDataType::Float32 };
+    static std::array<json::MlpDataType, NTC_MLP_LAYERS> const c_Int8BiasTypes = {
+        json::MlpDataType::Int32, json::MlpDataType::Int32, json::MlpDataType::Int32, json::MlpDataType::Int32 };
+    static std::array<json::MlpDataType, NTC_MLP_LAYERS> const c_Int8LegacyBiasTypes = {
         json::MlpDataType::Float32, json::MlpDataType::Float32, json::MlpDataType::Float32, json::MlpDataType::Float32 };
     static std::array<json::MlpDataType, NTC_MLP_LAYERS> const c_FP8WeightTypes = {
         json::MlpDataType::FloatE4M3, json::MlpDataType::FloatE4M3, json::MlpDataType::FloatE4M3, json::MlpDataType::Int8 };
-    static std::array<json::MlpDataType, NTC_MLP_LAYERS> const c_FP8ScaleBiasTypes = {
+    static std::array<std::optional<json::MlpDataType>, NTC_MLP_LAYERS> const c_FP8ScaleTypes = {
+        std::nullopt, std::nullopt, std::nullopt, json::MlpDataType::Float32 };
+    static std::array<json::MlpDataType, NTC_MLP_LAYERS> const c_FP8BiasTypes = {
         json::MlpDataType::Float16, json::MlpDataType::Float16, json::MlpDataType::Float16, json::MlpDataType::Float32 };
+    static std::array<json::MlpDataType, NTC_MLP_LAYERS> const c_FP8LegacyBiasTypes = {
+        json::MlpDataType::Float16, json::MlpDataType::Float16, json::MlpDataType::Float16, json::MlpDataType::Int32 };
 
     std::array<json::MlpDataType, NTC_MLP_LAYERS> weightTypes;
-    std::array<json::MlpDataType, NTC_MLP_LAYERS> scaleBiasTypes;
+    std::array<std::optional<json::MlpDataType>, NTC_MLP_LAYERS> scaleTypes;
+    std::array<json::MlpDataType, NTC_MLP_LAYERS> biasTypes;
     for (int layerIndex = 0; layerIndex < NTC_MLP_LAYERS; ++layerIndex)
     {
         json::MLPLayer const& layer = mlp.layers[layerIndex];
-        weightTypes[layerIndex] = layer.weightType.value_or(mlp.weightType);
-        scaleBiasTypes[layerIndex] = layer.scaleBiasType.value_or(mlp.scaleBiasType);
+        if (layer.weightType.has_value())
+            weightTypes[layerIndex] = *layer.weightType;
+        else if (mlp.weightType.has_value())
+            weightTypes[layerIndex] = *mlp.weightType;
+        else
+        {
+            SetErrorMessage("MLP layer %d doesn't have a weight type defined, "
+                "and the MLP doesn't have a default weight type either.", layerIndex);
+            return false;
+        }
+
+        if (layer.scaleType.has_value())
+            scaleTypes[layerIndex] = layer.scaleType;
+        else if (layer.scaleBiasType.has_value() && layer.scaleView.has_value())
+            scaleTypes[layerIndex] = layer.scaleBiasType;
+        else if (mlp.scaleBiasType.has_value() && layer.scaleView.has_value())
+            scaleTypes[layerIndex] = mlp.scaleBiasType;
+
+        if (layer.biasType.has_value())
+            biasTypes[layerIndex] = *layer.biasType;
+        else if (layer.scaleBiasType.has_value())
+            biasTypes[layerIndex] = *layer.scaleBiasType;
+        else if (mlp.scaleBiasType.has_value())
+            biasTypes[layerIndex] = *mlp.scaleBiasType;
+        else
+        {
+            SetErrorMessage("MLP layer %d doesn't have a bias type defined, "
+                "and the MLP doesn't have a default bias type either.", layerIndex);
+            return false;
+        }
     }
 
-    if (!(weightTypes == c_Int8WeightTypes && scaleBiasTypes == c_Int8ScaleBiasTypes) &&
-        !(weightTypes == c_FP8WeightTypes && scaleBiasTypes == c_FP8ScaleBiasTypes))
+    bool const isValidInt8MLP =
+        weightTypes == c_Int8WeightTypes &&
+        scaleTypes == c_Int8ScaleTypes &&
+        (biasTypes == c_Int8BiasTypes || biasTypes == c_Int8LegacyBiasTypes);
+
+    bool const isValidFP8MLP =
+        weightTypes == c_FP8WeightTypes &&
+        scaleTypes == c_FP8ScaleTypes &&
+        (biasTypes == c_FP8BiasTypes || biasTypes == c_FP8LegacyBiasTypes);
+
+    if (!isValidInt8MLP && !isValidFP8MLP)
     {
-        SetErrorMessage("Only Int8 weights + Float32 scale/bias or FloatE4M3 + Float16 scale/bias"
-            " are supported at this time.");
+        SetErrorMessage("Only Int8 weights + Float32 scale + Float32/Int32 bias or FloatE4M3 + Float16 bias"
+            " MLP configurations are supported at this time.");
         return false;
     }
 
@@ -975,15 +1217,20 @@ bool TextureSetMetadata::ValidateMLP(json::Document const& document, json::MLP c
         if (!ValidateBufferView(layer.weightView, expectedWeightSize, document))
             return false;
 
-        size_t const expectedScaleBiasSize = layer.outputChannels * GetMlpDataTypeSize(scaleBiasTypes[layerIndex]);
-
-        if (layer.scaleView.has_value())
+        if (scaleTypes[layerIndex].has_value())
         {
-            if (!ValidateBufferView(*layer.scaleView, expectedScaleBiasSize, document))
-                return false;
+            size_t const expectedScaleSize = layer.outputChannels * GetMlpDataTypeSize(*scaleTypes[layerIndex]);
+
+            if (layer.scaleView.has_value())
+            {
+                if (!ValidateBufferView(*layer.scaleView, expectedScaleSize, document))
+                    return false;
+            }
         }
 
-        if (!ValidateBufferView(layer.biasView, expectedScaleBiasSize, document))
+        size_t const expectedBiasSize = layer.outputChannels * GetMlpDataTypeSize(biasTypes[layerIndex]);
+
+        if (!ValidateBufferView(layer.biasView, expectedBiasSize, document))
             return false;
     }
 

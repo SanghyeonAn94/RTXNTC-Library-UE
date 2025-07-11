@@ -10,18 +10,21 @@
  * its affiliates is strictly prohibited.
  */
 
+// Custom header from a pre-rel Agility SDK goes first to avoid it being disabled by '#ifndef __d3d12_h__' in the beginning
+#if NTC_WITH_DX12
+#include <directx/d3d12.h>
+#endif
+
 #include "CoopVecWeightConverter.h"
 #include "Context.h"
 #include "GraphicsResources.h"
 #include "StdTypes.h"
+#include "MlpDesc.h"
+#include <cassert>
 
-#if NTC_WITH_DX12 && NTC_WITH_DX12_COOPVEC
+#if NTC_WITH_DX12
 #include <dxgi1_4.h>
-#include <nvapi.h>
 #include <wrl.h>
-#if NVAPI_SDK_VERSION < 572'18
-#error "LibNTC requires NVAPI SDK version R570 or newer."
-#endif
 #endif
 
 namespace ntc
@@ -29,314 +32,466 @@ namespace ntc
 
 static const uint32_t g_NvidiaVendorID = 0x10DE;
 
-#if NTC_WITH_VULKAN
-static VkConvertCooperativeVectorMatrixInfoNV GetVkConvertLayerDesc(bool useFP8, int inputChannels, int outputChannels,
-    size_t* pDstSize, void const* srcData = nullptr, void* dstData = nullptr)
+static DataType GetDataTypeForWeights(InferenceWeightType weightType)
 {
+    switch (weightType)
+    {
+    case InferenceWeightType::GenericInt8:
+    case InferenceWeightType::CoopVecInt8:
+        return DataType::Int8;
+    case InferenceWeightType::GenericFP8:
+    case InferenceWeightType::CoopVecFP8:
+        return DataType::FP8;
+    default:
+        return DataType::None;
+    }
+}
+
+static size_t GetDataTypeSize(DataType type)
+{
+    switch (type)
+    {
+    case DataType::None:
+        return 0;
+    case DataType::Int8:
+        return sizeof(uint8_t);
+    case DataType::Int32:
+        return sizeof(int32_t);
+    case DataType::FP8:
+        return sizeof(uint8_t);
+    case DataType::FP16:
+        return sizeof(uint16_t);
+    case DataType::FP32:
+        return sizeof(float);
+    default:
+        assert(!"Unsupported data type");
+        return 0;
+    }
+}
+
+#if NTC_WITH_VULKAN
+static VkConvertCooperativeVectorMatrixInfoNV GetVkConvertLayerDesc(DataType type, int inputChannels, int outputChannels,
+    size_t* pDstSize, uint64_t srcData = 0, uint64_t dstData = 0)
+{
+    size_t const componentSize = GetDataTypeSize(type);
+
     VkConvertCooperativeVectorMatrixInfoNV layoutInfo;
     layoutInfo.sType = VK_STRUCTURE_TYPE_CONVERT_COOPERATIVE_VECTOR_MATRIX_INFO_NV;
-    layoutInfo.pNext = nullptr;
-    layoutInfo.srcSize = inputChannels * outputChannels;
-    layoutInfo.srcData.hostAddress = srcData;
+    layoutInfo.srcSize = inputChannels * outputChannels * componentSize;
+    layoutInfo.srcData.deviceAddress = srcData;
     layoutInfo.pDstSize = pDstSize;
-    layoutInfo.dstData.hostAddress = dstData;
-    layoutInfo.srcComponentType = useFP8
-        ? VK_COMPONENT_TYPE_FLOAT_E4M3_NV
-        : VK_COMPONENT_TYPE_SINT8_KHR;
+    layoutInfo.dstData.deviceAddress = dstData;
+    switch (type)
+    {
+    case DataType::Int8:
+        layoutInfo.srcComponentType = VK_COMPONENT_TYPE_SINT8_KHR;
+        break;
+    case DataType::FP8:
+        layoutInfo.srcComponentType = VK_COMPONENT_TYPE_FLOAT_E4M3_NV;
+        break;
+    case DataType::FP16:
+        layoutInfo.srcComponentType = VK_COMPONENT_TYPE_FLOAT16_KHR;
+        layoutInfo.srcSize *= sizeof(uint16_t);
+        break;
+    default:
+        assert(!"Unsupported weight type for cooperative vector conversion");
+    }
     layoutInfo.dstComponentType = layoutInfo.srcComponentType;
     layoutInfo.numRows = outputChannels;
     layoutInfo.numColumns = inputChannels;
     layoutInfo.srcLayout = VK_COOPERATIVE_VECTOR_MATRIX_LAYOUT_ROW_MAJOR_NV;
-    layoutInfo.srcStride = inputChannels;
+    layoutInfo.srcStride = inputChannels * componentSize;
     layoutInfo.dstLayout = VK_COOPERATIVE_VECTOR_MATRIX_LAYOUT_INFERENCING_OPTIMAL_NV;
     layoutInfo.dstStride = 0;
     return layoutInfo;
 }
 #endif
 
-#if NTC_WITH_DX12 && NTC_WITH_DX12_COOPVEC
-static NVAPI_CONVERT_COOPERATIVE_VECTOR_MATRIX_DESC GetDX12ConvertLayerDesc(bool useFP8, int inputChannels, int outputChannels,
-    size_t* pDstSize, void const* srcData = nullptr, void* dstData = nullptr)
+#if NTC_WITH_DX12
+static D3D12_LINEAR_ALGEBRA_MATRIX_CONVERSION_DEST_INFO GetDX12ConvertLayerDestInfo(DataType type, int inputChannels, int outputChannels)
 {
-    NVAPI_CONVERT_COOPERATIVE_VECTOR_MATRIX_DESC convertDesc{};
-    convertDesc.version = NVAPI_CONVERT_COOPERATIVE_VECTOR_MATRIX_DESC_VER;
-    convertDesc.srcSize = inputChannels * outputChannels;
-    convertDesc.srcData.pHostAddress = const_cast<void*>(srcData);
-    convertDesc.pDstSize = pDstSize;
-    convertDesc.dstData.pHostAddress = dstData;
-    convertDesc.srcComponentType = useFP8
-        ? NVAPI_COOPERATIVE_VECTOR_COMPONENT_TYPE_SINT8
-        : NVAPI_COOPERATIVE_VECTOR_COMPONENT_TYPE_FLOAT_E4M3;
-    convertDesc.dstComponentType = convertDesc.srcComponentType;
-    convertDesc.numRows = outputChannels;
-    convertDesc.numColumns = inputChannels;
-    convertDesc.srcLayout = NVAPI_COOPERATIVE_VECTOR_MATRIX_LAYOUT_ROW_MAJOR;
-    convertDesc.srcStride = inputChannels;
-    convertDesc.dstLayout = NVAPI_COOPERATIVE_VECTOR_MATRIX_LAYOUT_INFERENCING_OPTIMAL;
-    convertDesc.dstStride = 0;
-    return convertDesc;
+    D3D12_LINEAR_ALGEBRA_MATRIX_CONVERSION_DEST_INFO info{};
+    info.DestLayout = D3D12_LINEAR_ALGEBRA_MATRIX_LAYOUT_MUL_OPTIMAL;
+    info.NumRows = outputChannels;
+    info.NumColumns = inputChannels;
+    info.DestStride = inputChannels;
+    switch (type)
+    {
+    case DataType::Int8:
+        info.DestDataType = D3D12_LINEAR_ALGEBRA_DATATYPE_SINT8;
+        break;
+    case DataType::FP8:
+        info.DestDataType = D3D12_LINEAR_ALGEBRA_DATATYPE_FLOAT_E4M3;
+        break;
+    case DataType::FP16:
+        info.DestDataType = D3D12_LINEAR_ALGEBRA_DATATYPE_FLOAT16;
+        break;
+    default:
+        assert(!"Unsupported weight type for cooperative vector conversion");
+    }
+    return info;
+}
+static D3D12_LINEAR_ALGEBRA_MATRIX_CONVERSION_INFO GetDX12ConvertLayerDesc(DataType type, int inputChannels, int outputChannels,
+    size_t dstSize, uint64_t srcData, uint64_t dstData)
+{
+    uint32_t const componentSize = uint32_t(GetDataTypeSize(type));
+
+    D3D12_LINEAR_ALGEBRA_MATRIX_CONVERSION_INFO info{};
+    info.DestInfo = GetDX12ConvertLayerDestInfo(type, inputChannels, outputChannels);
+    info.DestInfo.DestSize = UINT(dstSize);
+    info.SrcInfo.SrcSize = inputChannels * outputChannels * componentSize;
+    info.SrcInfo.SrcDataType = info.DestInfo.DestDataType;
+    info.SrcInfo.SrcLayout = D3D12_LINEAR_ALGEBRA_MATRIX_LAYOUT_ROW_MAJOR;
+    info.SrcInfo.SrcStride = inputChannels * componentSize;
+    info.DataDesc.SrcVA = srcData;
+    info.DataDesc.DestVA = dstData;
+    return info;
+}
+static D3D12_LINEAR_ALGEBRA_MATRIX_CONVERSION_INFO GetDX12CopyScaleBiasDesc(size_t size, uint64_t srcData, uint64_t dstData)
+{
+    D3D12_LINEAR_ALGEBRA_MATRIX_CONVERSION_INFO info{};
+    info.DestInfo.DestSize = UINT(size);
+    info.DestInfo.DestLayout = D3D12_LINEAR_ALGEBRA_MATRIX_LAYOUT_ROW_MAJOR;
+    info.DestInfo.DestStride = UINT(size);
+    info.DestInfo.NumRows = 1;
+    info.DestInfo.NumColumns = UINT(size);
+    info.DestInfo.DestDataType = D3D12_LINEAR_ALGEBRA_DATATYPE_UINT8;
+    info.SrcInfo.SrcSize = info.DestInfo.DestSize;
+    info.SrcInfo.SrcDataType = info.DestInfo.DestDataType;
+    info.SrcInfo.SrcLayout = info.DestInfo.DestLayout;
+    info.SrcInfo.SrcStride = info.DestInfo.DestStride;
+    info.DataDesc.SrcVA = srcData;
+    info.DataDesc.DestVA = dstData;
+    return info;
 }
 #endif
 
-CoopVecWeightConverter::CoopVecWeightConverter(GraphicsResources const* resources, bool useFP8,
-    int inputChannels, int hiddenChannels, int outputChannels, int numHiddenLayers)
-    : m_resources(resources)
-    , m_useFP8(useFP8)
-    , m_inputChannels(inputChannels)
-    , m_hiddenChannels(hiddenChannels)
-    , m_outputChannels(outputChannels)
-    , m_numHiddenLayers(numHiddenLayers)
+bool CoopVecWeightConverter::IsConversionSupported(GraphicsResources const* resources, InferenceWeightType weightType)
 {
-    if (m_useFP8)
-        m_isSupported = resources->IsCoopVecFP8Supported();
+    if (!resources)
+        return false;
+
+    switch (weightType)
+    {
+    case InferenceWeightType::CoopVecInt8: return resources->IsCoopVecInt8Supported();
+    case InferenceWeightType::CoopVecFP8: return resources->IsCoopVecFP8Supported();
+    default: return false;
+    }
+}
+
+bool CoopVecWeightConverter::GetWeightLayout(GraphicsResources const* resources, MlpDesc const& mlpDesc,
+    InferenceWeightType weightType, WeightLayout& outLayout)
+{
+    outLayout.weights[0].type = outLayout.weights[1].type = outLayout.weights[2].type = GetDataTypeForWeights(weightType);
+    outLayout.weights[3].type = (outLayout.weights[0].type == DataType::FP8) ? DataType::Int8 : outLayout.weights[0].type;
+
+    if (!IsCoopVecWeightType(weightType))
+    {
+        for (int layer = 0; layer < NTC_MLP_LAYERS; ++layer)
+        {
+            outLayout.weights[layer].size =
+                mlpDesc.GetLayerInputChannels(layer) *
+                mlpDesc.GetLayerOutputChannels(layer) *
+                GetDataTypeSize(outLayout.weights[layer].type);
+        }
+    }
     else
-        m_isSupported = resources->IsCoopVecInt8Supported();
+    {
+        // Handle all coopvec layouts below
 
-    if (m_isSupported)
-        CalculateOutputSizes();
+        if (!IsConversionSupported(resources, weightType))
+            return false;
+
+        if (resources->GetGraphicsApi() == GraphicsAPI::Vulkan)
+        {
+#if NTC_WITH_VULKAN
+            VkDevice const vkDevice = resources->GetVulkanDevice();
+
+            assert(vkDevice);
+            assert(resources->pfn_vkConvertCooperativeVectorMatrixNV);
+
+            // Compute converted weight sizes for all layers
+            for (int layer = 0; layer < NTC_MLP_LAYERS; ++layer)
+            {
+                VkConvertCooperativeVectorMatrixInfoNV convertInfo = GetVkConvertLayerDesc(
+                    outLayout.weights[layer].type, mlpDesc.GetLayerInputChannels(layer),
+                    mlpDesc.GetLayerOutputChannels(layer), &outLayout.weights[layer].size);
+
+                VkResult res = resources->pfn_vkConvertCooperativeVectorMatrixNV(vkDevice, &convertInfo);
+
+                if (res != VK_SUCCESS)
+                    return false;
+            }
+
+#else // !NTC_WITH_VULKAN
+            return false;
+#endif
+        }
+        if (resources->GetGraphicsApi() == GraphicsAPI::D3D12)
+        {
+#if NTC_WITH_DX12
+            ID3D12Device* d3dDevice = resources->GetD3D12Device();
+
+            Microsoft::WRL::ComPtr<ID3D12DevicePreview> devicePreview;
+            if (d3dDevice->QueryInterface(IID_PPV_ARGS(&devicePreview)) != S_OK)
+                return false;
+
+            // Compute converted weight sizes for all layers
+            for (int layer = 0; layer < NTC_MLP_LAYERS; ++layer)
+            {
+                // Compute converted size for input layer
+                D3D12_LINEAR_ALGEBRA_MATRIX_CONVERSION_DEST_INFO convertInfo = GetDX12ConvertLayerDestInfo(
+                    outLayout.weights[layer].type, mlpDesc.GetLayerInputChannels(layer),
+                    mlpDesc.GetLayerOutputChannels(layer));
+
+                devicePreview->GetLinearAlgebraMatrixConversionDestinationInfo(&convertInfo);
+
+                // The GetLinearAlgebraMatrixConversionDestinationInfo function doesn't have a way to signal failure,
+                // so check the returned size for sanity instead.
+                // Note: if the function fails, it might mean that the D3D12CooperativeVectorExperiment experimental
+                // feature is not enabled on the device.
+                if (convertInfo.DestSize == 0)
+                    return false;
+
+                outLayout.weights[layer].size = convertInfo.DestSize;
+            }
+
+#else // !NTC_WITH_DX12
+            return false;
+#endif
+        }
+    }
+
+    // Calculate the offsets for all layers' weights and total weight size
+    for (int layer = 1; layer < NTC_MLP_LAYERS; ++layer)
+    {
+        outLayout.weights[layer].offset = outLayout.weights[layer - 1].offset + outLayout.weights[layer - 1].size;
+    }
+    outLayout.combinedWeights.offset = 0;
+    outLayout.combinedWeights.size = outLayout.weights[NTC_MLP_LAYERS - 1].offset + outLayout.weights[NTC_MLP_LAYERS - 1].size;
+
+    // Calculate the sizes for the scale and bias vectors
+    size_t totalScaleSize = 0;
+    size_t totalBiasSize = 0;
+    for (int layer = 0; layer < NTC_MLP_LAYERS; ++layer)
+    {
+        DataType scaleType = DataType::None;
+        DataType biasType = DataType::None;
+
+        switch (weightType)
+        {
+        case InferenceWeightType::GenericInt8:
+        case InferenceWeightType::CoopVecInt8:
+            scaleType = DataType::FP32;
+            biasType = DataType::Int32;
+            break;
+
+        case InferenceWeightType::GenericFP8:
+        case InferenceWeightType::CoopVecFP8:
+            if (layer == NTC_MLP_LAYERS - 1)
+            {
+                scaleType = DataType::FP32;
+                biasType = DataType::Int32;
+            }
+            else
+            {
+                // FP8 mode uses FP16 bias vectors, no scale
+                biasType = DataType::FP16;
+            }
+            break;
+        }
+
+        outLayout.scales[layer].type = scaleType;
+        outLayout.biases[layer].type = biasType;
+        outLayout.scales[layer].size = GetDataTypeSize(scaleType) * mlpDesc.GetLayerOutputChannels(layer);
+        outLayout.biases[layer].size = GetDataTypeSize(biasType) * mlpDesc.GetLayerOutputChannels(layer);
+        totalScaleSize += outLayout.scales[layer].size;
+        totalBiasSize += outLayout.biases[layer].size;
+    }
+
+    // Allocate the scale and bias vector block
+    outLayout.combinedScaleBias.offset = outLayout.combinedWeights.offset + outLayout.combinedWeights.size;
+    outLayout.combinedScaleBias.size = totalScaleSize + totalBiasSize;
+
+    // Calculate the offsets for the scale and bias vectors following the rules for each format.
+    // See the comment in the beginning of TextureSet.cpp
+    switch (weightType)
+    {
+    case InferenceWeightType::GenericInt8:
+    case InferenceWeightType::CoopVecInt8:
+        // All scale vectors one after another, then all bias vectors
+        outLayout.scales[0].offset = outLayout.combinedScaleBias.offset;
+        outLayout.biases[0].offset = outLayout.combinedScaleBias.offset + totalScaleSize;
+        for (int layer = 1; layer < NTC_MLP_LAYERS; ++layer)
+        {
+            outLayout.scales[layer].offset = outLayout.scales[layer - 1].offset + outLayout.scales[layer - 1].size;
+            outLayout.biases[layer].offset = outLayout.biases[layer - 1].offset + outLayout.biases[layer - 1].size;
+        }
+        break;
+
+    case InferenceWeightType::GenericFP8:
+    case InferenceWeightType::CoopVecFP8:
+        // Bias vectors for layers 0-2, then scale for layer 3, bias for layer 3
+        outLayout.biases[0].offset = outLayout.combinedScaleBias.offset;
+        outLayout.biases[1].offset = outLayout.biases[0].offset + outLayout.biases[0].size;
+        outLayout.biases[2].offset = outLayout.biases[1].offset + outLayout.biases[1].size;
+        outLayout.scales[3].offset = outLayout.biases[2].offset + outLayout.biases[2].size;
+        outLayout.biases[3].offset = outLayout.scales[3].offset + outLayout.scales[3].size;
+        break;
+    }
+
+    outLayout.bufferSize = outLayout.combinedWeights.size + outLayout.combinedScaleBias.size;
+
+    return true;
 }
 
-void CoopVecWeightConverter::CalculateOutputSizes()
+void CoopVecWeightConverter::ConvertWeights(GraphicsResources const* resources, MlpDesc const& mlpDesc,
+    WeightLayout const& srcLayout, void* srcBuffer, uint64_t srcOffset,
+    WeightLayout const& dstLayout, void* dstBuffer, uint64_t dstOffset,
+    void* commandListOrBuffer)
 {
-    m_dstTotalSize = 0;
-    m_srcTotalSize = 0;
-    
-    if (m_useFP8 && !m_resources->IsCoopVecFP8Supported() || !m_useFP8 && !m_resources->IsCoopVecInt8Supported())
-        return;
+    assert(srcBuffer);
+    assert(dstBuffer);
+    assert(commandListOrBuffer);
     
 #if NTC_WITH_VULKAN
-    if (m_resources->GetGraphicsApi() == GraphicsAPI::Vulkan)
+    if (resources->GetGraphicsApi() == GraphicsAPI::Vulkan)
     {
-        VkDevice const vkDevice = m_resources->GetVulkanDevice();
-        PFN_vkConvertCooperativeVectorMatrixNV const vkConvertCooperativeVectorMatrixNV =
-            m_resources->GetConvertCooperativeVectorMatrixNV();
+        assert(resources->pfn_vkCmdConvertCooperativeVectorMatrixNV);
+        assert(resources->pfn_vkCmdCopyBuffer);
+        assert(resources->pfn_vkGetBufferDeviceAddress);
 
-        assert(vkDevice);
-        assert(vkConvertCooperativeVectorMatrixNV);
-     
-        {
-            // Compute converted size for input layer
-            VkConvertCooperativeVectorMatrixInfoNV convertInput =
-                GetVkConvertLayerDesc(m_useFP8, m_inputChannels, m_hiddenChannels, &m_dstWeightSizeInput);
-            vkConvertCooperativeVectorMatrixNV(vkDevice, &convertInput);
-            m_dstTotalSize += m_dstWeightSizeInput;
-            m_srcTotalSize += convertInput.srcSize;
-        }
-        {
-            // Compute converted size for hidden weights
-            VkConvertCooperativeVectorMatrixInfoNV convertHidden =
-                GetVkConvertLayerDesc(m_useFP8, m_hiddenChannels, m_hiddenChannels, &m_dstWeightSizeHidden);
-            vkConvertCooperativeVectorMatrixNV(vkDevice, &convertHidden);
-            m_dstTotalSize += m_dstWeightSizeHidden * m_numHiddenLayers;
-            m_srcTotalSize += convertHidden.srcSize * m_numHiddenLayers;
-        }
-        {
-            // Compute converted size for output layer weights
-            // Note: the output layer in FP8 mode uses Int8 math
-            VkConvertCooperativeVectorMatrixInfoNV convertOutput =
-                GetVkConvertLayerDesc(false, m_hiddenChannels, m_outputChannels, &m_dstWeightSizeOutput);
-            vkConvertCooperativeVectorMatrixNV(vkDevice, &convertOutput);
-            m_dstTotalSize += m_dstWeightSizeOutput;
-            m_srcTotalSize += convertOutput.srcSize;
-        }
+        VkDevice vkDevice = resources->GetVulkanDevice();
+        VkCommandBuffer vkCmdBuf = static_cast<VkCommandBuffer>(commandListOrBuffer);
+        VkBuffer vkSrcBuffer = static_cast<VkBuffer>(srcBuffer);
+        VkBuffer vkDstBuffer = static_cast<VkBuffer>(dstBuffer);
 
-        return;
+        // Obtain the device addresses of the buffers for the conversion functions
+        VkBufferDeviceAddressInfo bufferDeviceAddressInfo{};
+        bufferDeviceAddressInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+        bufferDeviceAddressInfo.buffer = vkSrcBuffer;
+        VkDeviceAddress const srcBufferVA = resources->pfn_vkGetBufferDeviceAddress(vkDevice, &bufferDeviceAddressInfo);
+        bufferDeviceAddressInfo.buffer = vkDstBuffer;
+        VkDeviceAddress const dstBufferVA = resources->pfn_vkGetBufferDeviceAddress(vkDevice, &bufferDeviceAddressInfo);
+
+        // Fill the array with conversion parameters for all layers
+        VkConvertCooperativeVectorMatrixInfoNV convertInfos[NTC_MLP_LAYERS];
+
+        for (int layer = 0; layer < NTC_MLP_LAYERS; ++layer)
+        {
+            int const inputChannels = mlpDesc.GetLayerInputChannels(layer);
+            int const outputChannels = mlpDesc.GetLayerOutputChannels(layer);
+
+            size_t dstLayerSize = dstLayout.weights[layer].size;
+            convertInfos[layer] = GetVkConvertLayerDesc(dstLayout.weights[layer].type,
+                inputChannels, outputChannels, &dstLayerSize,
+                srcBufferVA + srcOffset + srcLayout.weights[layer].offset,
+                dstBufferVA + dstOffset + dstLayout.weights[layer].offset);
+        }
+    
+        // Perform all conversions in one call
+        resources->pfn_vkCmdConvertCooperativeVectorMatrixNV(vkCmdBuf, NTC_MLP_LAYERS, convertInfos);
+
+        // Copy the scale and bias data
+        VkBufferCopy region{};
+        region.srcOffset = srcOffset + srcLayout.combinedScaleBias.offset;
+        region.dstOffset = dstOffset + dstLayout.combinedScaleBias.offset;
+        region.size = dstLayout.combinedScaleBias.size;
+
+        resources->pfn_vkCmdCopyBuffer(vkCmdBuf, vkSrcBuffer, vkDstBuffer, 1, &region);
     }
 #endif
-#if NTC_WITH_DX12 && NTC_WITH_DX12_COOPVEC
-    if (m_resources->GetGraphicsApi() == GraphicsAPI::D3D12)
+#if NTC_WITH_DX12
+    if (resources->GetGraphicsApi() == GraphicsAPI::D3D12)
     {
-        ID3D12Device* d3dDevice = m_resources->GetD3D12Device();
+        ID3D12Device* d3dDevice = resources->GetD3D12Device();
+        ID3D12GraphicsCommandList* d3dCmdList = static_cast<ID3D12GraphicsCommandList*>(commandListOrBuffer);
+        ID3D12Resource* d3dSrcBuffer = static_cast<ID3D12Resource*>(srcBuffer);
+        ID3D12Resource* d3dDstBuffer = static_cast<ID3D12Resource*>(dstBuffer);
 
-        NVAPI_CONVERT_COOPERATIVE_VECTOR_MATRIX_DESC convertInput =
-            GetDX12ConvertLayerDesc(m_useFP8, m_inputChannels, m_hiddenChannels, &m_dstWeightSizeInput);
-        NvAPI_D3D12_ConvertCooperativeVectorMatrix(d3dDevice, nullptr, &convertInput);
-        m_srcTotalSize += convertInput.srcSize;
-        m_dstTotalSize += m_dstWeightSizeInput;
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandListPreview> commandListPreview;
+        if (d3dCmdList->QueryInterface(IID_PPV_ARGS(&commandListPreview)) != S_OK)
+            return;
+
+        D3D12_GPU_VIRTUAL_ADDRESS const srcBufferVA = d3dSrcBuffer->GetGPUVirtualAddress();
+        D3D12_GPU_VIRTUAL_ADDRESS const dstBufferVA = d3dDstBuffer->GetGPUVirtualAddress();
+
+        D3D12_LINEAR_ALGEBRA_MATRIX_CONVERSION_INFO convertInfos[NTC_MLP_LAYERS + 1];
+
+        for (int layer = 0; layer < NTC_MLP_LAYERS; ++layer)
+        {
+            int const inputChannels = mlpDesc.GetLayerInputChannels(layer);
+            int const outputChannels = mlpDesc.GetLayerOutputChannels(layer);
+
+            convertInfos[layer] = GetDX12ConvertLayerDesc(
+                dstLayout.weights[layer].type, inputChannels, outputChannels,
+                dstLayout.weights[layer].size,
+                srcBufferVA + srcOffset + srcLayout.weights[layer].offset,
+                dstBufferVA + dstOffset + dstLayout.weights[layer].offset);
+        }
         
-        NVAPI_CONVERT_COOPERATIVE_VECTOR_MATRIX_DESC convertHidden =
-            GetDX12ConvertLayerDesc(m_useFP8, m_hiddenChannels, m_hiddenChannels, &m_dstWeightSizeHidden);
-        NvAPI_D3D12_ConvertCooperativeVectorMatrix(d3dDevice, nullptr, &convertHidden);
-        m_srcTotalSize += convertHidden.srcSize * m_numHiddenLayers;
-        m_dstTotalSize += m_dstWeightSizeHidden * m_numHiddenLayers;
-
-        // Note: the output layer in FP8 mode uses Int8 math
-        NVAPI_CONVERT_COOPERATIVE_VECTOR_MATRIX_DESC convertOutput =
-            GetDX12ConvertLayerDesc(false, m_hiddenChannels, m_outputChannels, &m_dstWeightSizeOutput);
-        NvAPI_D3D12_ConvertCooperativeVectorMatrix(d3dDevice, nullptr, &convertOutput);
-        m_srcTotalSize += convertOutput.srcSize;
-        m_dstTotalSize += m_dstWeightSizeOutput;
+        // Copy the scale and bias data.
+        // D3D's CopyBufferRegion requires resource states incompatible with the conversion ops.
+        // Use a degenerate form of a matrix conversion to copy the extra data and avoid placing a barrier.
+        convertInfos[4] = GetDX12CopyScaleBiasDesc(dstLayout.combinedScaleBias.size,
+            srcBufferVA + srcOffset + srcLayout.combinedScaleBias.offset,
+            dstBufferVA + dstOffset + dstLayout.combinedScaleBias.offset);
+        
+        commandListPreview->ConvertLinearAlgebraMatrix(convertInfos, NTC_MLP_LAYERS + 1);
     }
 #endif
 }
 
-void CoopVecWeightConverter::ConvertWeights(const uint8_t* src, uint8_t* dst)
+bool CoopVecWeightConverter::IsCoopVecWeightType(InferenceWeightType weightType)
 {
-#if NTC_WITH_VULKAN
-    if (m_resources->GetGraphicsApi() == GraphicsAPI::Vulkan)
-    {
-        VkDevice const vkDevice = m_resources->GetVulkanDevice();
-        PFN_vkConvertCooperativeVectorMatrixNV const vkConvertCooperativeVectorMatrixNV =
-            m_resources->GetConvertCooperativeVectorMatrixNV();
-
-        assert(vkDevice);
-        assert(vkConvertCooperativeVectorMatrixNV);
-
-        {
-            // Convert input layer weights
-            VkConvertCooperativeVectorMatrixInfoNV convertInput =
-                GetVkConvertLayerDesc(m_useFP8, m_inputChannels, m_hiddenChannels, &m_dstWeightSizeInput, src, dst);
-            vkConvertCooperativeVectorMatrixNV(vkDevice, &convertInput);
-            src += convertInput.srcSize;
-            dst += m_dstWeightSizeInput;
-        }
-        for (int hl = 0; hl < m_numHiddenLayers; hl++)
-        {
-            // Convert hidden layer weights
-            VkConvertCooperativeVectorMatrixInfoNV convertHidden =
-                GetVkConvertLayerDesc(m_useFP8, m_hiddenChannels, m_hiddenChannels, &m_dstWeightSizeHidden, src, dst);
-            vkConvertCooperativeVectorMatrixNV(vkDevice, &convertHidden);
-            src += convertHidden.srcSize;
-            dst += m_dstWeightSizeHidden;
-        }
-        {
-            // Convert output layer weights
-            // Note: the output layer in FP8 mode uses Int8 math
-            VkConvertCooperativeVectorMatrixInfoNV convertOutput =
-                GetVkConvertLayerDesc(false, m_hiddenChannels, m_outputChannels, &m_dstWeightSizeOutput, src, dst);
-            vkConvertCooperativeVectorMatrixNV(vkDevice, &convertOutput);
-        }
-
-        return;
-    }
-#endif
-#if NTC_WITH_DX12 && NTC_WITH_DX12_COOPVEC
-    if (m_resources->GetGraphicsApi() == GraphicsAPI::D3D12)
-    {
-        ID3D12Device* d3dDevice = m_resources->GetD3D12Device();
-
-        // Convert input layer weights
-        NVAPI_CONVERT_COOPERATIVE_VECTOR_MATRIX_DESC convertInput = GetDX12ConvertLayerDesc(
-            m_useFP8, m_inputChannels, m_hiddenChannels, &m_dstWeightSizeInput, src, dst);
-        NvAPI_D3D12_ConvertCooperativeVectorMatrix(d3dDevice, nullptr, &convertInput);
-        src += convertInput.srcSize;
-        dst += m_dstWeightSizeInput;
-        
-        // Convert hidden layer weights
-        for (int hl = 0; hl < m_numHiddenLayers; hl++)
-        {
-            NVAPI_CONVERT_COOPERATIVE_VECTOR_MATRIX_DESC convertHidden = GetDX12ConvertLayerDesc(
-                m_useFP8, m_hiddenChannels, m_hiddenChannels, &m_dstWeightSizeHidden, src, dst);
-            NvAPI_D3D12_ConvertCooperativeVectorMatrix(d3dDevice, nullptr, &convertHidden);
-            src += convertHidden.srcSize;
-            dst += m_dstWeightSizeHidden;
-        }
-
-        // Convert output layer weights
-        // Note: the output layer in FP8 mode uses Int8 math
-        NVAPI_CONVERT_COOPERATIVE_VECTOR_MATRIX_DESC convertOutput = GetDX12ConvertLayerDesc(
-            false, m_hiddenChannels, m_outputChannels, &m_dstWeightSizeOutput, src, dst);
-        NvAPI_D3D12_ConvertCooperativeVectorMatrix(d3dDevice, nullptr, &convertOutput);
-    }
-#endif
+    return weightType == InferenceWeightType::CoopVecInt8 ||
+        weightType == InferenceWeightType::CoopVecFP8;
 }
 
-void CoopVecWeightConverter::GetConvertedWeightOffsets(int weightOffsets[NTC_MLP_LAYERS])
+InferenceWeightType CoopVecWeightConverter::GetGenericWeightType(InferenceWeightType weightType)
 {
-    weightOffsets[0] = 0;
-    weightOffsets[1] = weightOffsets[0] + int(m_dstWeightSizeInput);
-    weightOffsets[2] = weightOffsets[1] + int(m_dstWeightSizeHidden);
-    weightOffsets[3] = weightOffsets[2] + int(m_dstWeightSizeHidden);
+    switch (weightType)
+    {
+    case InferenceWeightType::CoopVecInt8:
+        return InferenceWeightType::GenericInt8;
+    case InferenceWeightType::CoopVecFP8:
+        return InferenceWeightType::GenericFP8;
+    default:
+        // For all other types, return the same type
+        return weightType;
+    }
 }
 
 #if NTC_WITH_DX12
-bool CoopVecWeightConverter::InitializeNVAPI()
-{
-#if NTC_WITH_DX12_COOPVEC
-    return NvAPI_Initialize() == NVAPI_OK;
-#else
-    return false;
-#endif
-}
-
-#if NTC_WITH_DX12_COOPVEC
-static bool GetNvidiaGpuArchitectureAndDriverVersion(ID3D12Device* pD3DDevice,
-    NV_GPU_ARCHITECTURE_ID& outArchitectureID, NvU32& outDriverVersion)
-{
-    NvAPI_ShortString driverBranch;
-    if (NvAPI_SYS_GetDriverAndBranchVersion(&outDriverVersion, driverBranch) != NVAPI_OK)
-        return false;
-
-    NvLogicalGpuHandle logicalGPUs[NVAPI_MAX_LOGICAL_GPUS]{};
-    NvU32 logicalGpuCount = 0;
-    if (NvAPI_EnumLogicalGPUs(logicalGPUs, &logicalGpuCount) != NVAPI_OK)
-        return false;
-
-    LUID const adapterLuid = pD3DDevice->GetAdapterLuid();
-    for (NvU32 gpu = 0; gpu < logicalGpuCount; ++gpu)
-    {
-        LUID gpuLuid{};
-        NV_LOGICAL_GPU_DATA logicalGpuData{};
-        logicalGpuData.version = NV_LOGICAL_GPU_DATA_VER;
-        logicalGpuData.pOSAdapterId = &gpuLuid;
-
-        if (NvAPI_GPU_GetLogicalGpuInfo(logicalGPUs[gpu], &logicalGpuData) != NVAPI_OK)
-            continue;
-
-        if (logicalGpuData.physicalGpuCount == 0)
-            continue;
-
-        if (adapterLuid.LowPart == gpuLuid.LowPart && adapterLuid.HighPart == gpuLuid.HighPart)
-        {
-            NV_GPU_ARCH_INFO archInfo{};
-            archInfo.version = NV_GPU_ARCH_INFO_VER;
-
-            if (NvAPI_GPU_GetArchInfo(logicalGpuData.physicalGpuHandles[0], &archInfo) != NVAPI_OK)
-                return false;
-
-            outArchitectureID = archInfo.architecture_id;
-
-            return true;
-        }
-    }
-
-    return false;
-}
-#endif
-
 void CoopVecWeightConverter::IsDX12CoopVecSupported(GraphicsResources const* resources,
     bool& outInt8Supported, bool& outFP8Supported)
 {
     outInt8Supported = false;
     outFP8Supported = false;
 
-#if NTC_WITH_DX12_COOPVEC
-    NV_GPU_ARCHITECTURE_ID architectureID{};
-    NvU32 driverVersion = 0;
-    if (!GetNvidiaGpuArchitectureAndDriverVersion(resources->GetD3D12Device(), architectureID, driverVersion))
+    // Get the general cooperative vector support tier
+    D3D12_FEATURE_DATA_D3D12_OPTIONS_EXPERIMENTAL experimentalOptions{};
+    if (resources->GetD3D12Device()->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS_EXPERIMENTAL,
+        &experimentalOptions, UINT(sizeof experimentalOptions)) != S_OK)
         return;
 
-    // Verify that we're running on NVIDIA driver version 570 or above.
-    // R565 reports cooperative vector support through NVAPI but it doesn't actually work.
-    if (driverVersion < 570'00)
+    if (experimentalOptions.CooperativeVectorTier < D3D12_COOPERATIVE_VECTOR_TIER_1_0)
         return;
 
-    // Verify that we're running on NVIDIA Ada or newer GPU.
-    // There are driver bugs (4959641) with DX12 CoopVec on Ampere.
-    if (architectureID < NV_GPU_ARCHITECTURE_AD100)
+    // Get the format count
+    D3D12_FEATURE_DATA_COOPERATIVE_VECTOR coopVecData{};
+    if (resources->GetD3D12Device()->CheckFeatureSupport(D3D12_FEATURE_COOPERATIVE_VECTOR,
+        &coopVecData, UINT(sizeof coopVecData)) != S_OK)
         return;
-
-    // Get the property count
-    NvU32 propertyCount = 0;
-    if (NvAPI_D3D12_GetPhysicalDeviceCooperativeVectorProperties(resources->GetD3D12Device(),
-        &propertyCount, nullptr) != NVAPI_OK)
-        return;
-
-    Vector<NVAPI_COOPERATIVE_VECTOR_PROPERTIES> properties(propertyCount, resources->GetAllocator());
-
-    // Get the actual properties
-    if (NvAPI_D3D12_GetPhysicalDeviceCooperativeVectorProperties(resources->GetD3D12Device(),
-        &propertyCount, properties.data()) != NVAPI_OK)
+    
+    // Get the supported format list
+    Vector<D3D12_COOPERATIVE_VECTOR_PROPERTIES_MUL> properties(coopVecData.MatrixVectorMulAddPropCount,
+        resources->GetAllocator());
+    coopVecData.pMatrixVectorMulAddProperties = properties.data();
+    coopVecData.OuterProductAccumulatePropCount = 0;
+    coopVecData.VectorAccumulatePropCount = 0;
+    if (resources->GetD3D12Device()->CheckFeatureSupport(D3D12_FEATURE_COOPERATIVE_VECTOR,
+        &coopVecData, UINT(sizeof coopVecData)) != S_OK)
         return;
 
     // Go over the properties and see if there are formats that we need in the list
@@ -345,42 +500,27 @@ void CoopVecWeightConverter::IsDX12CoopVecSupported(GraphicsResources const* res
     bool fp8LayersSupported = false;
     for (const auto& prop : properties)
     {
-        if (prop.version == NVAPI_COOPERATIVE_VECTOR_PROPERTIES_VER &&
-            prop.inputType == NVAPI_COOPERATIVE_VECTOR_COMPONENT_TYPE_UINT32 &&
-            prop.inputInterpretation == NVAPI_COOPERATIVE_VECTOR_COMPONENT_TYPE_SINT8_PACKED &&
-            prop.matrixInterpretation == NVAPI_COOPERATIVE_VECTOR_COMPONENT_TYPE_SINT8 &&
-            prop.resultType == NVAPI_COOPERATIVE_VECTOR_COMPONENT_TYPE_SINT32)
+        if (prop.InputType == D3D12_LINEAR_ALGEBRA_DATATYPE_UINT32 &&
+            prop.InputInterpretation == D3D12_LINEAR_ALGEBRA_DATATYPE_SINT8_T4_PACKED &&
+            prop.MatrixInterpretation == D3D12_LINEAR_ALGEBRA_DATATYPE_SINT8 &&
+            prop.OutputType == D3D12_LINEAR_ALGEBRA_DATATYPE_SINT32)
             int8InputLayerSupported = true;
             
-        if (prop.version == NVAPI_COOPERATIVE_VECTOR_PROPERTIES_VER &&
-            prop.inputType == NVAPI_COOPERATIVE_VECTOR_COMPONENT_TYPE_FLOAT32 &&
-            prop.inputInterpretation == NVAPI_COOPERATIVE_VECTOR_COMPONENT_TYPE_SINT8 &&
-            prop.matrixInterpretation == NVAPI_COOPERATIVE_VECTOR_COMPONENT_TYPE_SINT8 &&
-            prop.resultType == NVAPI_COOPERATIVE_VECTOR_COMPONENT_TYPE_SINT32)
+        if (prop.InputType == D3D12_LINEAR_ALGEBRA_DATATYPE_FLOAT32 &&
+            prop.InputInterpretation == D3D12_LINEAR_ALGEBRA_DATATYPE_SINT8 &&
+            prop.MatrixInterpretation == D3D12_LINEAR_ALGEBRA_DATATYPE_SINT8 &&
+            prop.OutputType == D3D12_LINEAR_ALGEBRA_DATATYPE_SINT32)
             int8OtherLayersSupported = true;
 
-        if (prop.version == NVAPI_COOPERATIVE_VECTOR_PROPERTIES_VER &&
-            prop.inputType == NVAPI_COOPERATIVE_VECTOR_COMPONENT_TYPE_FLOAT16 &&
-            prop.inputInterpretation == NVAPI_COOPERATIVE_VECTOR_COMPONENT_TYPE_FLOAT_E4M3 &&
-            prop.matrixInterpretation == NVAPI_COOPERATIVE_VECTOR_COMPONENT_TYPE_FLOAT_E4M3 &&
-            prop.resultType == NVAPI_COOPERATIVE_VECTOR_COMPONENT_TYPE_FLOAT16)
+        if (prop.InputType == D3D12_LINEAR_ALGEBRA_DATATYPE_FLOAT16 &&
+            prop.InputInterpretation == D3D12_LINEAR_ALGEBRA_DATATYPE_FLOAT_E4M3 &&
+            prop.MatrixInterpretation == D3D12_LINEAR_ALGEBRA_DATATYPE_FLOAT_E4M3 &&
+            prop.OutputType == D3D12_LINEAR_ALGEBRA_DATATYPE_FLOAT16)
             fp8LayersSupported = true;
     }
 
     outInt8Supported = int8InputLayerSupported && int8OtherLayersSupported;
     outFP8Supported = int8OtherLayersSupported && fp8LayersSupported;
-#endif
-}
-
-void CoopVecWeightConverter::UnloadNVAPI()
-{
-#if NTC_WITH_DX12_COOPVEC
-    // TODO: Enable the NvAPI_Unload call.
-    // It is disabled as a workaround for bug 5057998: Calling Unload before destroying the DX12 device
-    // results in a crash inside the device destructor.
-    
-    // NvAPI_Unload();
-#endif
 }
 #endif
 
@@ -391,12 +531,9 @@ void CoopVecWeightConverter::IsVkCoopVecSupported(GraphicsResources const* resou
     outInt8Supported = false;
     outFP8Supported = false;
 
-    PFN_vkGetPhysicalDeviceCooperativeVectorPropertiesNV const vkGetPhysicalDeviceCooperativeVectorPropertiesNV = 
-        resources->GetGetPhysicalDeviceCooperativeVectorPropertiesNV();
-
     VkPhysicalDevice vkPhysicalDevice = resources->GetVulkanPhysicalDevice();
 
-    if (!vkGetPhysicalDeviceCooperativeVectorPropertiesNV || !vkPhysicalDevice)
+    if (!resources->pfn_vkGetPhysicalDeviceCooperativeVectorPropertiesNV || !vkPhysicalDevice)
         return;
 
     // Verify that the physical device we're on was made by NVIDIA.
@@ -407,7 +544,7 @@ void CoopVecWeightConverter::IsVkCoopVecSupported(GraphicsResources const* resou
     
     // Get the property count
     uint32_t propertyCount = 0;
-    if (vkGetPhysicalDeviceCooperativeVectorPropertiesNV(vkPhysicalDevice,
+    if (resources->pfn_vkGetPhysicalDeviceCooperativeVectorPropertiesNV(vkPhysicalDevice,
         &propertyCount, nullptr) != VK_SUCCESS)
         return;
         
@@ -417,7 +554,7 @@ void CoopVecWeightConverter::IsVkCoopVecSupported(GraphicsResources const* resou
         prop.sType = VK_STRUCTURE_TYPE_COOPERATIVE_VECTOR_PROPERTIES_NV;
 
     // Get the actual properties
-    if (vkGetPhysicalDeviceCooperativeVectorPropertiesNV(vkPhysicalDevice,
+    if (resources->pfn_vkGetPhysicalDeviceCooperativeVectorPropertiesNV(vkPhysicalDevice,
         &propertyCount, properties.data()) != VK_SUCCESS)
         return;
 

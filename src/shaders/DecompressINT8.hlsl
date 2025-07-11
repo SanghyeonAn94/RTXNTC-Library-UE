@@ -25,8 +25,9 @@ static const int LR_LATENT_MEM_SIZE = (Params::LR_FEATURES / 4) * LR_LATENTS_WID
 // Second phase - matrix and scale/bias preloading
 static const int MATRIX_B_BASE_ADDR = 0;
 static const int MATRIX_B_MEM_SIZE = MAX_OUTPUT_SIZE * (MAX_INPUT_SIZE / 4);
-static const int SCALE_BIAS_BASE_ADDR = MATRIX_B_MEM_SIZE;
-static const int SCALE_BIAS_SIZE = MAX_OUTPUT_SIZE * 2;
+static const int SCALE_BIAS_SIZE = MAX_OUTPUT_SIZE;
+static const int BIAS_BASE_ADDR = MATRIX_B_MEM_SIZE;
+static const int SCALE_BASE_ADDR = BIAS_BASE_ADDR + SCALE_BIAS_SIZE;
 
 // Third phase - output shuffling
 static const int OUTPUT_BASE_ADDR = 0;
@@ -38,7 +39,7 @@ static const int OUTPUT_UINTS = Params::OUTPUT_CHANNELS;
 static const int OUTPUT_SIZE = DECOMPRESS_CS_BLOCK_WIDTH * DECOMPRESS_CS_BLOCK_HEIGHT * (OUTPUT_UINTS+1);
 
 // Calculate the total shared memory size and allocate it
-static const int SHARED_MEMORY_SIZE = max(OUTPUT_SIZE, max(HR_LATENT_MEM_SIZE + LR_LATENT_MEM_SIZE, MATRIX_B_MEM_SIZE + SCALE_BIAS_SIZE));
+static const int SHARED_MEMORY_SIZE = max(OUTPUT_SIZE, max(HR_LATENT_MEM_SIZE + LR_LATENT_MEM_SIZE, MATRIX_B_MEM_SIZE + SCALE_BIAS_SIZE * 2));
 groupshared uint s_SharedMem[SHARED_MEMORY_SIZE];
 
 // Shared memory address calculation functions
@@ -58,9 +59,14 @@ int GetMatrixBAddress(int col, int row)
     return MATRIX_B_BASE_ADDR + col * (MAX_INPUT_SIZE / 4) + row;
 }
 
-int GetScaleBiasAddress(int index)
+int GetBiasAddress(int index)
 {
-    return SCALE_BIAS_BASE_ADDR + index * 2;
+    return BIAS_BASE_ADDR + index;
+}
+
+int GetScaleAddress(int index)
+{
+    return SCALE_BASE_ADDR + index;
 }
 
 int GetOutputAddress(int ch, int2 threadIdx)
@@ -190,13 +196,11 @@ void EvaluateLayerINT8_SharedMem(
     const int linearThreadIndex = threadIndex.x + threadIndex.y * DECOMPRESS_CS_BLOCK_WIDTH;
     if (linearThreadIndex < OUT)
     {
-        float2 scaleBias;
-        scaleBias.x = t_WeightBuffer.Load<float>(scaleBiasOffset + linearThreadIndex * sizeof(float));
-        scaleBias.y = t_WeightBuffer.Load<float>(scaleBiasOffset + (totalChannels + linearThreadIndex) * sizeof(float));
+        float scale = t_WeightBuffer.Load<float>(scaleBiasOffset + linearThreadIndex * sizeof(float));
+        int bias = t_WeightBuffer.Load<int>(scaleBiasOffset + (totalChannels + linearThreadIndex) * sizeof(int));
 
-        const int sharedAddr = GetScaleBiasAddress(linearThreadIndex);
-        s_SharedMem[sharedAddr + 0] = asuint(scaleBias.x);
-        s_SharedMem[sharedAddr + 1] = asuint(scaleBias.y);
+        s_SharedMem[GetScaleAddress(linearThreadIndex)] = asuint(scale);
+        s_SharedMem[GetBiasAddress(linearThreadIndex)] = asuint(bias);
     }
 
     // Preload the weights into shared memory.
@@ -224,10 +228,10 @@ void EvaluateLayerINT8_SharedMem(
     // and the resulting code works slower than a regular loop.
     for (uint c = 0; c < OUT; c += 4)
     {
-        int acc0 = 0;
-        int acc1 = 0;
-        int acc2 = 0;
-        int acc3 = 0;
+        int acc0 = asint(s_SharedMem[GetBiasAddress(c + 0)]);
+        int acc1 = asint(s_SharedMem[GetBiasAddress(c + 1)]);
+        int acc2 = asint(s_SharedMem[GetBiasAddress(c + 2)]);
+        int acc3 = asint(s_SharedMem[GetBiasAddress(c + 3)]);
         
         [unroll]
         for (uint k = 0; k < IN / 4; k++)
@@ -252,16 +256,13 @@ void EvaluateLayerINT8_SharedMem(
 
         float4 results = float4(acc0, acc1, acc2, acc3);
 
-        int const scaleBiasAddr = GetScaleBiasAddress(c);
-        float2 scaleBias0 = asfloat(uint2(s_SharedMem[scaleBiasAddr + 0], s_SharedMem[scaleBiasAddr + 1]));
-        float2 scaleBias1 = asfloat(uint2(s_SharedMem[scaleBiasAddr + 2], s_SharedMem[scaleBiasAddr + 3]));
-        float2 scaleBias2 = asfloat(uint2(s_SharedMem[scaleBiasAddr + 4], s_SharedMem[scaleBiasAddr + 5]));
-        float2 scaleBias3 = asfloat(uint2(s_SharedMem[scaleBiasAddr + 6], s_SharedMem[scaleBiasAddr + 7]));
+        float4 scales;
+        scales.x = asfloat(s_SharedMem[GetScaleAddress(c + 0)]);
+        scales.y = asfloat(s_SharedMem[GetScaleAddress(c + 1)]);
+        scales.z = asfloat(s_SharedMem[GetScaleAddress(c + 2)]);
+        scales.w = asfloat(s_SharedMem[GetScaleAddress(c + 3)]);
 
-        results.x = results.x * scaleBias0.x + scaleBias0.y;
-        results.y = results.y * scaleBias1.x + scaleBias1.y;
-        results.z = results.z * scaleBias2.x + scaleBias2.y;
-        results.w = results.w * scaleBias3.x + scaleBias3.y;
+        results *= scales;
 
 #if USE_FLOAT16
         float16_t4 hresults = float16_t4(results);

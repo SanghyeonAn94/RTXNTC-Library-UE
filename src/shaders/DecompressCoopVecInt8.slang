@@ -20,7 +20,6 @@ groupshared uint32_t s_Latents[LATENTS_COUNT / 4][HR_LATENTS_HEIGHT][HR_LATENTS_
 #define TOTAL_BIAS_CHANNELS (Params::HIDDEN_LAYER_CHANNELS * 3 + Params::OUTPUT_CHANNELS)
 
 groupshared float s_Scale[TOTAL_BIAS_CHANNELS];
-groupshared float s_Bias[TOTAL_BIAS_CHANNELS];
 groupshared float s_Outputs[DECOMPRESS_CS_BLOCK_HEIGHT * DECOMPRESS_CS_BLOCK_WIDTH * (Params::OUTPUT_CHANNELS + 4)];
 
 void PreloadLatents<let NUM_FEATURES: int>(
@@ -110,15 +109,14 @@ void SampleLatentGridShared<let NUM_FEATURES: int, let ALL_CORNERS: bool>(
 }
 
 inline void EvaluateLayer_CoopVec_Shared<T_IN: __BuiltinArithmeticType, let T_IN_NUM: int, let IN_IS_PACKED: bool, let IN: int, let OUT: int, let ACT: bool>(
-    int weightOffset, inout uint scaleBiasOffset, in CoopVec<T_IN, T_IN_NUM> inputArray, out CoopVec<float, OUT> outputArray)
+    int weightOffset, inout uint scaleOffset, inout uint biasOffset, in CoopVec<T_IN, T_IN_NUM> inputArray, out CoopVec<float, OUT> outputArray)
 {
-    NtcEvaluateLayerMatMul_CoopVec<T_IN, T_IN_NUM, IN_IS_PACKED, IN, OUT>
-        (t_WeightBuffer, weightOffset, inputArray, outputArray);
+    NtcEvaluateLayerMatMulAdd_CoopVec_Int8<T_IN, T_IN_NUM, IN_IS_PACKED, IN, OUT>
+        (t_WeightBuffer, weightOffset, biasOffset, inputArray, outputArray);
 
-    let scale = CoopVec<float, OUT>.load(s_Scale, scaleBiasOffset * sizeof(float));
-    let bias = CoopVec<float, OUT>.load(s_Bias, scaleBiasOffset * sizeof(float));
+    let scale = CoopVec<float, OUT>.load(s_Scale, scaleOffset);
 
-    outputArray = outputArray * scale + bias;
+    outputArray = outputArray * scale;
 
     if (ACT)
     {
@@ -126,7 +124,8 @@ inline void EvaluateLayer_CoopVec_Shared<T_IN: __BuiltinArithmeticType, let T_IN
     }
 
     // Advance the input offset to point at the next layer.
-    scaleBiasOffset += OUT;
+    scaleOffset += OUT * sizeof(float);
+    biasOffset += OUT * sizeof(float);
 }
 
 void DecompressPixel_CoopVec(uint2 globalIndex, uint2 threadIndex)
@@ -157,18 +156,14 @@ void DecompressPixel_CoopVec(uint2 globalIndex, uint2 threadIndex)
         baseLowResLatentPos, Params::HR_FEATURES / 4, threadIndex);
 #endif
 
-    // Preload the bias values into shared memory.
-    int ipScaleBiasOffset = g_Const.networkScaleBiasOffset;
-
+    // Preload the scale values into shared memory.
     int linearThreadIndex = threadIndex.x + threadIndex.y * DECOMPRESS_CS_BLOCK_WIDTH;
 
     while (linearThreadIndex < TOTAL_BIAS_CHANNELS)
     {
-        float scale = t_WeightBuffer.Load<float>(ipScaleBiasOffset + linearThreadIndex * sizeof(float));
-        float bias  = t_WeightBuffer.Load<float>(ipScaleBiasOffset + (TOTAL_BIAS_CHANNELS + linearThreadIndex) * sizeof(float));
+        float scale = t_WeightBuffer.Load<float>(g_Const.networkScaleBiasOffset + linearThreadIndex * sizeof(float));
 
         s_Scale[linearThreadIndex] = scale;
-        s_Bias [linearThreadIndex] = bias;
         linearThreadIndex += (DECOMPRESS_CS_BLOCK_WIDTH * DECOMPRESS_CS_BLOCK_HEIGHT);
     }
 
@@ -212,28 +207,29 @@ void DecompressPixel_CoopVec(uint2 globalIndex, uint2 threadIndex)
     for (int i = 0; i < Params::INPUT_CHANNELS / 4; ++i)
         networkInputsVec[i] = networkInputs[i];
 
-    int scaleBiasOffset = 0;
+    int scaleOffset = 0;
+    int biasOffset = g_Const.networkScaleBiasOffset + TOTAL_BIAS_CHANNELS * sizeof(float);
 
     // Evaluate the MLP layers:
     // Input layer.  Inputs are packed i.e. 4 int8s in a uint.
     CoopVec<float, Params::HIDDEN_LAYER_CHANNELS> hiddenOutput1;
     EvaluateLayer_CoopVec_Shared<uint32_t, Params::INPUT_CHANNELS/4, true, Params::INPUT_CHANNELS, Params::HIDDEN_LAYER_CHANNELS, true>
-    (g_Const.networkWeightOffsets.x, scaleBiasOffset, networkInputsVec, hiddenOutput1);
+    (g_Const.networkWeightOffsets.x, scaleOffset, biasOffset, networkInputsVec, hiddenOutput1);
     
     // Hidden layer 1. Inputs are float and converted internally to int8 by rounding. 
     CoopVec<float, Params::HIDDEN_LAYER_CHANNELS> hiddenOutput2;
     EvaluateLayer_CoopVec_Shared<float, Params::HIDDEN_LAYER_CHANNELS, false, Params::HIDDEN_LAYER_CHANNELS, Params::HIDDEN_LAYER_CHANNELS, true>
-    (g_Const.networkWeightOffsets.y, scaleBiasOffset, hiddenOutput1, hiddenOutput2);
+    (g_Const.networkWeightOffsets.y, scaleOffset, biasOffset, hiddenOutput1, hiddenOutput2);
     
     // Hidden layer 2. Inputs are float and converted internally to int8 by rounding. 
     CoopVec<float, Params::HIDDEN_LAYER_CHANNELS> hiddenOutput3;
     EvaluateLayer_CoopVec_Shared<float, Params::HIDDEN_LAYER_CHANNELS, false, Params::HIDDEN_LAYER_CHANNELS, Params::HIDDEN_LAYER_CHANNELS, true>
-    (g_Const.networkWeightOffsets.z, scaleBiasOffset, hiddenOutput2, hiddenOutput3);
+    (g_Const.networkWeightOffsets.z, scaleOffset, biasOffset, hiddenOutput2, hiddenOutput3);
     
     // Output layer. Inputs are float and converted internally to int8 by rounding. 
     CoopVec<float, Params::OUTPUT_CHANNELS> networkOutputs;
     EvaluateLayer_CoopVec_Shared<float, Params::HIDDEN_LAYER_CHANNELS, false, Params::HIDDEN_LAYER_CHANNELS, Params::OUTPUT_CHANNELS, false>
-    (g_Const.networkWeightOffsets.w, scaleBiasOffset, hiddenOutput3, networkOutputs);
+    (g_Const.networkWeightOffsets.w, scaleOffset, biasOffset, hiddenOutput3, networkOutputs);
 
     // Store the outputs into shared memory for efficient indexed access later.
     // Note: there is no need for a barrier before or after this store because we're using a dedicated

@@ -168,9 +168,6 @@ __device__ void RegressionKernel(RegressionKernelParams const params)
 
     // Derive the addressing parameters for this mip level
     MipInfo const& mipInfo = g_MipInfo[mip];
-    const int neuralLod = mipInfo.neuralLod;
-    const int neuralWidth = std::max(params.referenceWidth >> (2 * neuralLod), 1);
-    const int neuralHeight = std::max(params.referenceHeight >> (2 * neuralLod), 1);
     const int referenceWidth = std::max(params.referenceWidth >> mip, 1);
     const int referenceHeight = std::max(params.referenceHeight >> mip, 1);
 

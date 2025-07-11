@@ -2,9 +2,9 @@
 
 This repository (or folder, depending on how you got here) contains the source code for the NTC library.
 
-LibNTC can be built separately following the same instructions as the full [RTXNTC SDK](https://github.com/NVIDIA-RTX/RTXNTC), and does not depend on anything else in the SDK. This means it can be included into a larger project by copying only this folder or adding a submodule.
+LibNTC can be built separately following the same instructions as the full [RTX Neural Texture Compression SDK](https://github.com/NVIDIA-RTX/RTXNTC), and does not depend on anything else in the SDK. This means it can be included into a larger project by copying only this folder or adding a submodule.
 
-For the integration guide, please see the RTXNTC SDK.
+For the integration guide, please see the RTX Neural Texture Compression SDK.
 
 ## CMake Configuration options
 
@@ -31,5 +31,3 @@ For the integration guide, please see the RTXNTC SDK.
 ## License
 
 [NVIDIA RTX SDKs LICENSE](LICENSE.txt)
-
-This project includes NVAPI software. All uses of NVAPI software are governed by the license terms specified here: https://github.com/NVIDIA/nvapi/blob/main/License.txt
