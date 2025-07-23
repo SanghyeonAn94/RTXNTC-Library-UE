@@ -73,7 +73,7 @@ int FeatureGridMath::CalculateNumNeuralMipLevels(int imageWidth, int imageHeight
 {
     const int minImageSize = std::min(imageWidth, imageHeight);
     const int minGridSize = int(float(minImageSize) / float(highResGridScale * 2));
-    return std::max(1, int((1.f + floor(std::log2f(float(minGridSize)))) / 2.f));
+    return std::max(1, int((1.f + floor(std::log2f(float(minGridSize)))) / float(NeuralMipRatio)));
 }
 
 int FeatureGridMath::CalculateNumLatentsInNeuralMip(Grid grid, int imageWidth, int imageHeight, int highResGridScale, int mip)

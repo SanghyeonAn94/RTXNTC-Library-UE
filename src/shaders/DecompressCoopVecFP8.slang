@@ -131,9 +131,9 @@ void DecompressPixel_CoopVec(uint2 globalIndex, uint2 threadIndex)
     PreloadLatents<Params::LR_FEATURES>(NtcUnpackLatentEncodingConstants(g_Const.lowResEncoding),
         lowResNeuralMip, lowResNeuralScale,
         baseLowResLatentPos, Params::HR_FEATURES / 4, threadIndex);
-#endif
 
     GroupMemoryBarrierWithGroupSync();
+#endif
     
     CoopVec<float16_t, Params::INPUT_CHANNELS> networkInputs;
 

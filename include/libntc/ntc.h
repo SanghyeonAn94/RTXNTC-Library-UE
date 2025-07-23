@@ -316,13 +316,6 @@ struct Point
 {
     int x = 0;
     int y = 0;
-
-    Point()
-    { }
-
-    Point(int _x, int _y)
-        : x(_x), y(_y)
-    { }
 };
 
 struct Rect
@@ -331,17 +324,6 @@ struct Rect
     int top = 0;
     int width = 0;
     int height = 0;
-
-    Rect()
-    { }
-    
-    Rect(int _width, int _height)
-        : left(0), top(0), width(_width), height(_height)
-    { }
-
-    Rect(int _left, int _top, int _width, int _height)
-        : left(_left), top(_top), width(_width), height(_height)
-    { }
 };
 
 class ISharedTexture

@@ -149,13 +149,16 @@ static D3D12_LINEAR_ALGEBRA_MATRIX_CONVERSION_INFO GetDX12ConvertLayerDesc(DataT
 }
 static D3D12_LINEAR_ALGEBRA_MATRIX_CONVERSION_INFO GetDX12CopyScaleBiasDesc(size_t size, uint64_t srcData, uint64_t dstData)
 {
+    assert(size % sizeof(float) == 0);
+
     D3D12_LINEAR_ALGEBRA_MATRIX_CONVERSION_INFO info{};
     info.DestInfo.DestSize = UINT(size);
     info.DestInfo.DestLayout = D3D12_LINEAR_ALGEBRA_MATRIX_LAYOUT_ROW_MAJOR;
     info.DestInfo.DestStride = UINT(size);
     info.DestInfo.NumRows = 1;
-    info.DestInfo.NumColumns = UINT(size);
-    info.DestInfo.DestDataType = D3D12_LINEAR_ALGEBRA_DATATYPE_UINT8;
+    info.DestInfo.NumColumns = UINT(size) / sizeof(float);
+    // Use FP32 to define the scale and bias copy for comatibility with Intel GPUs
+    info.DestInfo.DestDataType = D3D12_LINEAR_ALGEBRA_DATATYPE_FLOAT32;
     info.SrcInfo.SrcSize = info.DestInfo.DestSize;
     info.SrcInfo.SrcDataType = info.DestInfo.DestDataType;
     info.SrcInfo.SrcLayout = info.DestInfo.DestLayout;
