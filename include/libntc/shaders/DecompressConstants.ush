@@ -13,7 +13,7 @@
 #ifndef DECOMPRESS_CONSTANTS_H
 #define DECOMPRESS_CONSTANTS_H
 
-#include "InferenceConstants.h"
+#include "InferenceConstants.ush"
 
 // Note: the block dimensions must be small enough to make sure that the shared memory arrays
 // used in the shader fit into the DirectX's 32 KB shared memory size limit.
