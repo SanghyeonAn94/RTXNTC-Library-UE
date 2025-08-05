@@ -1276,4 +1276,4 @@ NTC_API double DecodeImageDifferenceResult(uint64_t value);
 
 }
 
-#include "wrappers.ush"
+#include "wrappers.h"
