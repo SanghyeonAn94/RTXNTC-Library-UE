@@ -17,7 +17,7 @@
 #define CoopVec vector
 #endif
 
-#include "Inference.hlsli"
+#include "Inference.ush"
 
 #if __SLANG__
 void NtcCoopVecStoreHalf4<let SIZE: int>(inout CoopVec<float16_t, SIZE> vec, int offset, float16_t4 values)

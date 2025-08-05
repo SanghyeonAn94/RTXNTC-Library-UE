@@ -31,7 +31,7 @@
     #endif
 #endif
 
-#include "shaders/InferenceConstants.h"
+#include "shaders/InferenceConstants.ush"
 
 namespace ntc
 {
@@ -1276,4 +1276,4 @@ NTC_API double DecodeImageDifferenceResult(uint64_t value);
 
 }
 
-#include "wrappers.h"
+#include "wrappers.ush"

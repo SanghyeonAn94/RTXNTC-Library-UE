@@ -13,8 +13,8 @@
 #ifndef NTC_INFERENCE_HLSLI
 #define NTC_INFERENCE_HLSLI
 
-#include "InferenceConstants.h"
-#include "ColorSpaces.hlsli"
+#include "InferenceConstants.ush"
+#include "ColorSpaces.ush"
 
 // Define this macro before including the header to set the DP4a support flag for compatibility with older GPUs
 #ifndef NTC_USE_DP4A
