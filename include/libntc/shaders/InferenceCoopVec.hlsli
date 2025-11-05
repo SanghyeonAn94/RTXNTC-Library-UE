@@ -17,7 +17,7 @@
 #define CoopVec vector
 #endif
 
-#include "Inference.ush"
+#include "Inference.hlsli"
 
 bool NtcSampleLatentGrid_FP16(
     Texture2DArray latentTexture,

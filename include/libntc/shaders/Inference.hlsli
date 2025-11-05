@@ -13,8 +13,8 @@
 #ifndef NTC_INFERENCE_HLSLI
 #define NTC_INFERENCE_HLSLI
 
-#include "InferenceConstants.ush"
-#include "ColorSpaces.ush"
+#include "InferenceConstants.h"
+#include "ColorSpaces.hlsli"
 
 // Helper macros used to declare templated functions with different t-parameter counts in Slang and HLSL.
 #if __SLANG__
