@@ -19,7 +19,7 @@ namespace ntc::cuda
 {
 
 void OptimizeNetwork(
-    int    dispatchSize,
+    uint32_t dispatchSize,
     bool   useFloatGradients,
     half* __restrict__ baseWeights,
     half* __restrict__ quantizedWeights,
@@ -43,9 +43,9 @@ void ReduceNetworkGrad(
 
 
 void OptimizeLatentGrid(
-    int         numLatents,
-    int         numFeatures,
-    int         quantizationBits,
+    uint32_t    numPixels,
+    uint32_t    numFeatures,
+    size_t      latentStride,
     bool        useFloatGradients,
     half*       __restrict__ baseWeights,
     half*       __restrict__ quantizedWeights,
@@ -67,6 +67,6 @@ constexpr int LOSS_ITEMS_PER_THREAD = 4;
 constexpr int LOSS_ITEMS_PER_GROUP = LOSS_GROUP_SIZE * LOSS_ITEMS_PER_THREAD;
 
 // Computes a sum of the items in 'loss' array on the GPU, outputs it into 'outReducedLoss'
-cudaError_t ReduceLoss(int size, float* __restrict__ loss, DeviceAndHostArray<float>& scratch, float& outReducedLoss);
+cudaError_t ReduceLoss(size_t size, float* __restrict__ loss, DeviceAndHostArray<float>& scratch, float& outReducedLoss);
 
 } // namespace ntc::cuda

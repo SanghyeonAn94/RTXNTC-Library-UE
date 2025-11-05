@@ -131,13 +131,9 @@ if (NTC_WITH_CUDA)
         NTC_CUDA_MIN_COMPUTE_MINOR=${NTC_CUDA_MIN_COMPUTE_MINOR})
 
     file(GLOB tin_sources "${CMAKE_CURRENT_SOURCE_DIR}/tin/*.h")
-    file(GLOB kernels
-        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/*.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/*.cu")
 
     target_sources(libntc PRIVATE 
         ${tin_sources}
-        ${kernels}
         CudaArray.h
         CudaDeviceGuard.cpp
         CudaDeviceGuard.h
@@ -149,27 +145,38 @@ if (NTC_WITH_CUDA)
         FeatureGridHost.h
         ImageProcessing.cu
         ImageProcessing.h
+        Inference.cu
         Optimizer.cu
         Optimizer.h
         Quantizer.cu
         Quantizer.h
         Regression.cu
         Regression.h
+        RegressionFast.cu
+        RegressionStable.cu
         RegressionKernels.h
         SharedTexture.h
         SharedTexture.cpp
         TextureSet.cpp
         TextureSet.h
     )
+
+    source_group("TIN Library" FILES ${tin_sources})
+    source_group("Generated CUDA Kernels" FILES ${kernels})
 endif()
 
-target_sources(libntc PRIVATE 
+set(public_headers
     ${include_directory}/libntc/ntc.h
     ${include_directory}/libntc/wrappers.h
     ${include_directory}/libntc/shaders/BlockCompressConstants.h
     ${include_directory}/libntc/shaders/DecompressConstants.h
     ${include_directory}/libntc/shaders/ImageDifferenceConstants.h
     ${include_directory}/libntc/shaders/InferenceConstants.h
+    ${include_directory}/libntc/shaders/Bindings.h
+)
+
+target_sources(libntc PRIVATE 
+    ${public_headers}
     AdaptiveCompressionSession.h
     AdaptiveCompressionSession.cpp
     ChannelInfo.h
@@ -188,7 +195,6 @@ target_sources(libntc PRIVATE
     JsonSerialization.h
     JsonSerialization.cpp
     KnownLatentShapes.h
-    LatentQuantization.h
     MathUtils.h
     MlpDesc.cpp
     MlpDesc.h
@@ -203,6 +209,8 @@ target_sources(libntc PRIVATE
     TextureSetMetadata.h
     TextureSetMetadata.cpp
 )
+
+source_group("Public Headers" FILES ${public_headers})
 
 if (NTC_WITH_VULKAN)
     if (TARGET Vulkan-Headers)
@@ -226,7 +234,7 @@ if (NTC_WITH_PREBUILT_SHADERS AND (NTC_WITH_DX12 OR NTC_WITH_VULKAN))
         Shaders.cpp
     )
 
-    set(shader_sources
+    set(public_shader_headers
         ${include_directory}/libntc/shaders/BlockCompressConstants.h
         ${include_directory}/libntc/shaders/ColorSpaces.hlsli
         ${include_directory}/libntc/shaders/DecompressConstants.h
@@ -234,6 +242,9 @@ if (NTC_WITH_PREBUILT_SHADERS AND (NTC_WITH_DX12 OR NTC_WITH_VULKAN))
         ${include_directory}/libntc/shaders/Inference.hlsli
         ${include_directory}/libntc/shaders/InferenceConstants.h
         ${include_directory}/libntc/shaders/InferenceCoopVec.hlsli
+    )
+
+    set(shader_sources
         shaders/BlockCompressCommon.hlsli
         shaders/CompressBC1.hlsl
         shaders/CompressBC2.hlsl
@@ -244,21 +255,22 @@ if (NTC_WITH_PREBUILT_SHADERS AND (NTC_WITH_DX12 OR NTC_WITH_VULKAN))
         shaders/CompressBC7.hlsl
         shaders/DecompressCommon.hlsli
         shaders/DecompressINT8.hlsl
-        shaders/DecompressCoopVecInt8.slang
         shaders/DecompressCoopVecFP8.slang
         shaders/HashBasedRNG.hlsli
         shaders/ImageDifference.hlsl
-        shaders/Vulkan.hlsli
+        shaders/BindingHelpers.hlsli
     )
 
+    source_group("Public Headers" FILES ${public_shader_headers})
+    source_group("Shaders" FILES ${shader_sources})
+
     set(shader_config_file "${CMAKE_CURRENT_SOURCE_DIR}/shaders/Shaders.cfg")
-    set(shader_config_file_slang "${CMAKE_CURRENT_SOURCE_DIR}/shaders/SlangShaders.cfg")
-    set(shader_config_file_test "${CMAKE_CURRENT_SOURCE_DIR}/shaders/TestShaders.cfg")
+    set(shader_config_file_coopvec "${CMAKE_CURRENT_SOURCE_DIR}/shaders/CoopVecShaders.cfg")
     set(shader_output_dir "${CMAKE_CURRENT_BINARY_DIR}/shaders")
 
     add_custom_target(libntc-shaders
         DEPENDS ShaderMake
-        SOURCES ${shader_sources})
+        SOURCES ${shader_sources} ${public_shader_headers})
 
     set_source_files_properties(${shader_sources} PROPERTIES VS_TOOL_OVERRIDE "None") 
 
@@ -274,7 +286,6 @@ if (NTC_WITH_PREBUILT_SHADERS AND (NTC_WITH_DX12 OR NTC_WITH_VULKAN))
         ${shader_output_dir}/CompressBC7.dxil.h
         ${shader_output_dir}/DecompressINT8.dxil.h
         ${shader_output_dir}/ImageDifference.dxil.h
-        ${shader_output_dir}/InferenceCoopVecCompileTest.dxil.h
     )
 
     set(shader_byproducts_spirv
@@ -289,13 +300,11 @@ if (NTC_WITH_PREBUILT_SHADERS AND (NTC_WITH_DX12 OR NTC_WITH_VULKAN))
         ${shader_output_dir}/ImageDifference.spirv.h
     )
 
-    set(shader_byproducts_slang_spirv
-        ${shader_output_dir}/DecompressCoopVecInt8.spirv.h
+    set(shader_byproducts_coopvec_spirv
         ${shader_output_dir}/DecompressCoopVecFP8.spirv.h
     )
 
-    set(shader_byproducts_slang_dxil
-        ${shader_output_dir}/DecompressCoopVecInt8.dxil.h
+    set(shader_byproducts_coopvec_dxil
         ${shader_output_dir}/DecompressCoopVecFP8.dxil.h
     )
 
@@ -311,20 +320,14 @@ if (NTC_WITH_PREBUILT_SHADERS AND (NTC_WITH_DX12 OR NTC_WITH_VULKAN))
             --hlsl2021
             -I ${include_directory})
 
-        add_custom_command(TARGET libntc-shaders PRE_BUILD BYPRODUCTS ${shader_byproducts_slang_dxil} COMMAND ShaderMake
-            --config ${shader_config_file_slang}
+        add_custom_command(TARGET libntc-shaders PRE_BUILD BYPRODUCTS ${shader_byproducts_coopvec_dxil} COMMAND ShaderMake
+            --config ${shader_config_file_coopvec}
             --out ${shader_output_dir}
             --platform DXIL
             --project LibNTC
             --headerBlob
-            --compiler ${SHADERMAKE_SLANG_PATH}
+            --compiler ${SHADERMAKE_DXC_PATH}
             --shaderModel 6_9
-            --slang
-            --noRegShifts
-            -X -Wno-41012
-            -X -Wno-41016
-            -X -Wno-41017
-            -X "-Xdxc -Vd" # disable validation, it's not ready
             -I ${include_directory})
     endif()
 
@@ -336,13 +339,14 @@ if (NTC_WITH_PREBUILT_SHADERS AND (NTC_WITH_DX12 OR NTC_WITH_VULKAN))
             --platform SPIRV
             --headerBlob
             --compiler ${SHADERMAKE_DXC_PATH}
+            --noRegShifts
             --vulkanVersion 1.2
             --hlsl2021
             -I ${include_directory}
             -D SPIRV)
 
-        add_custom_command(TARGET libntc-shaders PRE_BUILD BYPRODUCTS ${shader_byproducts_slang_spirv} COMMAND ShaderMake
-            --config ${shader_config_file_slang}
+        add_custom_command(TARGET libntc-shaders PRE_BUILD BYPRODUCTS ${shader_byproducts_coopvec_spirv} COMMAND ShaderMake
+            --config ${shader_config_file_coopvec}
             --out ${shader_output_dir}
             --project LibNTC
             --platform SPIRV

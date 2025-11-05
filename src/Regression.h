@@ -30,13 +30,10 @@ bool ValidateKernelSpec(
     int lowResFeatures);
 
 void Regression(
-    int pixelsPerBatch,
+    size_t pixelsPerBatch,
     bool stableTraining,
-    MlpDesc const& kernelVersion,
     RegressionKernelParams const& params);
 
-void Inference(
-    MlpDesc const& kernelVersion,
-    InferenceKernelParams const& params);
+void Inference(InferenceKernelParams const& params);
 
 } // namespace ntc::cuda
